@@ -1,55 +1,86 @@
 # prebid-bundler
 
-A Bun-based service that manages multiple Prebid.js versions and exposes an API to list available bidder modules.
+A Bun-based service that manages multiple Prebid.js versions and provides an API to build custom Prebid bundles with specified modules.
 
-## Prerequisites
+## Quick Start
 
-- [Bun](https://bun.sh) v1.3.5+
-- Git
-- Node.js (for building Prebid.js versions)
-
-## Installation
+### Using as a Package
 
 ```bash
-bun install
+# Install the package
+bun add prebid-bundler
+
+# Initialize Docker files in your project
+bunx prebid-bundler init
+
+# Build a Docker image
+docker build -t my-prebid-bundler .
+docker run -p 8787:8787 my-prebid-bundler
 ```
 
-## Usage
-
-### 1. Checkout Prebid.js Versions (optional for local development)
-
-Download and build Prebid.js releases locally:
+### Local Development
 
 ```bash
-# Checkout the 2 most recent versions (default)
+# Clone and install
+git clone <repo-url>
+cd prebid-bundler
+bun install
+
+# Checkout Prebid.js versions
 bun run checkout
 
-# Checkout N most recent versions
-bun run checkout -- -n 5
-
-# Checkout a specific version
-bun run checkout -- -v 10.20.0
-
-# Checkout multiple specific versions
-bun run checkout -- -v 10.20.0 -v 9.0.0
-
-# Keep working clone for faster subsequent runs
-bun run checkout -- -n 3 --keep
+# Start the server
+bun run dev
 ```
 
-Run `bun run checkout -- --help` for all options.
+## CLI Commands
 
-### 2. Start the Server
+The package provides a `prebid-bundler` CLI with the following commands:
+
+### `prebid-bundler init`
+
+Initialize Docker files in your project for building custom images.
 
 ```bash
-# Development mode with hot reload
-bun run dev
-
-# Production mode
-bun run start
+prebid-bundler init                  # Minimal - references node_modules
+prebid-bundler init --full           # Full - standalone, copies all source files
+prebid-bundler init --compose        # Include docker-compose.yml
+prebid-bundler init -o ./docker      # Output to specific directory
 ```
 
-The server runs on port 8787 by default. Set `PORT` environment variable to change.
+### `prebid-bundler build`
+
+Build a Docker image directly.
+
+```bash
+prebid-bundler build                                    # Default: 2 recent versions
+prebid-bundler build --count 5 --tag my-prebid:v1       # 5 recent versions
+prebid-bundler build --versions 10.20.0,9.53.5          # Specific versions
+prebid-bundler build --push                             # Push to registry after build
+```
+
+### `prebid-bundler checkout`
+
+Clone and build Prebid.js versions locally.
+
+```bash
+prebid-bundler checkout                      # 2 most recent versions
+prebid-bundler checkout -n 5                 # 5 most recent versions
+prebid-bundler checkout -v 10.20.0           # Specific version
+prebid-bundler checkout -v 10.20.0 -v 9.0.0  # Multiple versions
+prebid-bundler checkout --keep               # Keep working clone for faster runs
+```
+
+### `prebid-bundler serve`
+
+Start the HTTP server.
+
+```bash
+prebid-bundler serve              # Default port 8787
+prebid-bundler serve --port 3000  # Custom port
+```
+
+Run `prebid-bundler --help` or `prebid-bundler <command> --help` for full options.
 
 ## API Endpoints
 
@@ -61,7 +92,6 @@ List all available Prebid.js versions.
 curl http://localhost:8787/versions
 ```
 
-Response:
 ```json
 {
   "versions": ["10.20.0", "10.19.0"]
@@ -70,17 +100,16 @@ Response:
 
 ### GET /modules/:version
 
-List all modules for a specific version.
+List all bundleable modules for a specific version.
 
 ```bash
 curl http://localhost:8787/modules/10.20.0
 ```
 
-Response:
 ```json
 {
   "version": "10.20.0",
-  "modules": ["appnexusBidAdapter", "rubiconBidAdapter", ...]
+  "modules": ["appnexusBidAdapter", "rubiconBidAdapter", "..."]
 }
 ```
 
@@ -95,15 +124,6 @@ curl -X POST http://localhost:8787/bundle/10.20.0 \
   -o prebid.js
 ```
 
-Request body:
-```json
-{
-  "modules": ["appnexusBidAdapter", "rubiconBidAdapter", "consentManagement"]
-}
-```
-
-Response: JavaScript file stream (`application/javascript`)
-
 ### GET /health
 
 Health check endpoint.
@@ -112,32 +132,75 @@ Health check endpoint.
 curl http://localhost:8787/health
 ```
 
-## Testing
-
-```bash
-bun test
-```
-
 ## Docker
 
-The Docker build automatically checks out and builds Prebid.js versions.
-
-### Default (2 most recent versions)
+### Build from Source
 
 ```bash
+# Default (2 most recent versions)
 docker build -t prebid-bundler .
+
+# Multiple versions
+docker build --build-arg PREBID_COUNT=5 -t prebid-bundler .
+
+# Specific version (recommended for production)
+docker build --build-arg PREBID_VERSION=10.20.0 -t prebid-bundler:10.20.0 .
+```
+
+### Run
+
+```bash
 docker run -p 8787:8787 prebid-bundler
 ```
 
-### Multiple versions
+### Docker Compose
 
 ```bash
-docker build --build-arg PREBID_COUNT=5 -t prebid-bundler .
+# After running: prebid-bundler init --compose
+docker-compose up --build
 ```
 
-### Single version (recommended for production)
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8787` | Server port |
+| `BUILD_TIMEOUT_MS` | `60000` | Gulp build timeout in milliseconds |
+
+## Development
+
+### Prerequisites
+
+- [Bun](https://bun.sh) v1.0.0+
+- Git
+- Node.js/npm (for building Prebid.js)
+- Docker (optional, for containerized builds)
+
+### Scripts
 
 ```bash
-docker build --build-arg PREBID_VERSION=10.20.0 -t prebid-bundler:10.20.0 .
-docker run -p 8787:8787 prebid-bundler:10.20.0
+bun install          # Install dependencies
+bun run dev          # Development server with hot reload
+bun run start        # Production server
+bun run checkout     # Checkout Prebid.js versions
+bun test             # Run tests
 ```
+
+### Project Structure
+
+```
+prebid-bundler/
+├── bin/cli.ts           # CLI entry point
+├── src/
+│   ├── index.ts         # HTTP server
+│   ├── utils.ts         # Version parsing utilities
+│   └── commands/        # CLI command implementations
+├── docker/              # Docker templates for init command
+├── checkout.ts          # Prebid checkout script
+├── Dockerfile           # Main Dockerfile
+└── package.json
+```
+
+## License
+
+MIT

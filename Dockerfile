@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git npm \
 
 COPY --from=install /temp/prod/node_modules node_modules
 COPY package.json bun.lock ./
+COPY src ./src
 COPY checkout.ts .
 
 # Run checkout - ownership is set via COPY --chown in release stage
@@ -54,7 +55,7 @@ COPY package.json .
 
 # Copy prebid versions with ownership set (also creates builds dir)
 COPY --chown=bun:bun --from=prebid /usr/src/app/dist ./dist
-RUN mkdir -p ./dist/builds && chown bun:bun ./dist/builds``
+RUN mkdir -p ./dist/builds && chown bun:bun ./dist/builds
 
 ENV PORT=8787
 USER bun
