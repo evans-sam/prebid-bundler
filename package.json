@@ -1,0 +1,23 @@
+{
+  "name": "prebid-bundler",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "checkout": "bun run checkout.ts",
+    "test": "bun test",
+    "docker:build": "docker build -t prebid-bundler ."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/semver": "^7.7.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "semver": "^7.7.3"
+  }
+}

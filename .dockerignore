@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+
+# IDE and editor
+.idea
+.vscode
+.cursor
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Logs
+*.log
+logs
+
+# Test coverage
+coverage
+*.lcov
+
+# Environment
+.env
+.env.*
+
+# Documentation (not needed in image)
+*.md
+!README.md
