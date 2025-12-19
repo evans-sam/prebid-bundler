@@ -1,21 +1,26 @@
 import {parseVersion} from "./utils.ts";
 import {join} from "node:path";
-import {readdir, stat, rm, mkdir} from "node:fs/promises";
-import {existsSync} from "node:fs";
+import {mkdir, readdir, rm} from "node:fs/promises";
+import {existsSync} from "node:fs"; // Keep for directory checks (Bun.file().exists() returns false for dirs)
+
+// Export utilities for programmatic use
+export * from "./utils.ts";
+export * from "./commands/index.ts";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const PREBID_DIR = join(ROOT_DIR, "dist", "prebid.js");
 const BUILDS_DIR = join(ROOT_DIR, "dist", "builds");
 const PORT = parseInt(process.env.PORT || "8787");
+const BUILD_TIMEOUT_MS = parseInt(process.env.BUILD_TIMEOUT_MS || "60000"); // 60 seconds default
 
 interface BuildMetrics {
     buildId: string;
-    version: string;
-    moduleCount: number;
-    validation: number;
     dirSetup: number;
     gulpBuild: number;
+    moduleCount: number;
     total: number;
+    validation: number;
+    version: string;
 }
 
 function logMetrics(metrics: BuildMetrics): void {
@@ -32,6 +37,20 @@ function logMetrics(metrics: BuildMetrics): void {
 function getVersionDir(version: string): string {
     const underscores = version.replaceAll(/\./g, "_");
     return join(PREBID_DIR, `prebid_${underscores}`);
+}
+
+async function cleanupBuildDir(buildDir: string, buildId?: string): Promise<boolean> {
+    const id = buildId ? buildId.slice(0, 8) : "unknown";
+    try {
+        await rm(buildDir, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
+        return true;
+    } catch (error) {
+        console.error(
+            `[cleanup:${id}] failed to remove ${buildDir}: ` +
+            `${error instanceof Error ? error.message : error}`
+        );
+        return false;
+    }
 }
 
 async function getAvailableVersions(): Promise<string[]> {
@@ -53,19 +72,21 @@ async function getModulesForVersion(version: string): Promise<string[]> {
         throw new Error(`Version ${version} not found`);
     }
 
-    const files = await readdir(modulesDir);
+    // Use withFileTypes to avoid separate stat calls
+    const entries = await readdir(modulesDir, {withFileTypes: true});
     const modulesSet = new Set<string>();
 
-    for (const file of files) {
-        const filePath = join(modulesDir, file);
-        const fileStat = await stat(filePath);
-
-        if (fileStat.isDirectory()) {
-            if (existsSync(join(filePath, "index.js")) || existsSync(join(filePath, "index.ts"))) {
-                modulesSet.add(file);
+    for (const entry of entries) {
+        if (entry.isDirectory()) {
+            // Check for index.js or index.ts using Bun.file().exists()
+            const dirPath = join(modulesDir, entry.name);
+            const hasIndex = await Bun.file(join(dirPath, "index.js")).exists() ||
+                await Bun.file(join(dirPath, "index.ts")).exists();
+            if (hasIndex) {
+                modulesSet.add(entry.name);
             }
-        } else if (file.endsWith(".js") || file.endsWith(".ts")) {
-            modulesSet.add(file.replace(/\.(js|ts)$/, ""));
+        } else if (entry.name.endsWith(".js") || entry.name.endsWith(".ts")) {
+            modulesSet.add(entry.name.replace(/\.(js|ts)$/, ""));
         }
     }
 
@@ -77,26 +98,20 @@ interface BundleRequest {
 }
 
 interface BuildResult {
-    outputFile: string;
-    buildId: string;
     buildDir: string;
+    buildId: string;
+    outputFile: string;
 }
 
 async function buildBundle(version: string, modules: string[]): Promise<BuildResult> {
     const totalStart = performance.now();
     const buildId = crypto.randomUUID();
 
-    // Phase 1: Validation
+    // Phase 1: Validation (version only - let gulp validate modules)
     const validationStart = performance.now();
     const versionDir = getVersionDir(version);
     if (!existsSync(versionDir)) {
         throw new Error(`Version ${version} not found`);
-    }
-
-    const availableModules = await getModulesForVersion(version);
-    const invalidModules = modules.filter((m) => !availableModules.includes(m));
-    if (invalidModules.length > 0) {
-        throw new Error(`Invalid modules: ${invalidModules.join(", ")}`);
     }
     const validationTime = performance.now() - validationStart;
 
@@ -106,7 +121,7 @@ async function buildBundle(version: string, modules: string[]): Promise<BuildRes
     await mkdir(buildDir, {recursive: true});
     const dirSetupTime = performance.now() - dirSetupStart;
 
-    // Phase 3: Gulp build
+    // Phase 3: Gulp build with timeout
     const gulpStart = performance.now();
     const modulesArg = modules.join(",");
     const proc = Bun.spawn(["npx", "gulp", "bundle", `--modules=${modulesArg}`], {
@@ -119,23 +134,36 @@ async function buildBundle(version: string, modules: string[]): Promise<BuildRes
         },
     });
 
-    const exitCode = await proc.exited;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+            proc.kill();
+            reject(new Error(`Build timed out after ${BUILD_TIMEOUT_MS}ms`));
+        }, BUILD_TIMEOUT_MS);
+    });
+
+    let exitCode: number;
+    try {
+        exitCode = await Promise.race([proc.exited, timeoutPromise]);
+    } catch (error) {
+        await cleanupBuildDir(buildDir, buildId);
+        throw error;
+    }
     const gulpTime = performance.now() - gulpStart;
 
     if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
-        await rm(buildDir, {recursive: true, force: true});
+        await cleanupBuildDir(buildDir, buildId);
         throw new Error(`Build failed: ${stderr}`);
     }
 
-    // Find the built file
+    // Find the built file using Bun.file().exists()
     let outputFile = join(buildDir, "prebid.js");
-    if (!existsSync(outputFile)) {
+    if (!await Bun.file(outputFile).exists()) {
         const defaultOutput = join(versionDir, "build", "dist", "prebid.js");
-        if (existsSync(defaultOutput)) {
+        if (await Bun.file(defaultOutput).exists()) {
             outputFile = defaultOutput;
         } else {
-            await rm(buildDir, {recursive: true, force: true});
+            await cleanupBuildDir(buildDir, buildId);
             throw new Error("Build completed but output file not found");
         }
     }
@@ -178,11 +206,13 @@ async function* generateFileStream(
 
         if (cleanupDir) {
             const cleanupStart = performance.now();
-            await rm(cleanupDir, {recursive: true, force: true}).catch(() => {});
-            console.log(
-                `[cleanup:${buildId.slice(0, 8)}] ` +
-                `completed in ${(performance.now() - cleanupStart).toFixed(0)}ms`
-            );
+            const success = await cleanupBuildDir(cleanupDir, buildId);
+            if (success) {
+                console.log(
+                    `[cleanup:${buildId.slice(0, 8)}] ` +
+                    `completed in ${(performance.now() - cleanupStart).toFixed(0)}ms`
+                );
+            }
         }
     }
 }
@@ -225,21 +255,33 @@ const server = Bun.serve({
                     return Response.json({error: "modules array is required"}, {status: 400});
                 }
 
+                // Clean up modules: filter falsy, trim strings, dedupe
+                const modules = [...new Set(
+                    body.modules
+                        .filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+                        .map((m) => m.trim())
+                )];
+
+                if (modules.length === 0) {
+                    return Response.json({error: "modules array must contain valid module names"}, {status: 400});
+                }
+
                 console.log(
-                    `[request] POST /bundle/${version} with ${body.modules.length} modules: ` +
-                    `${body.modules.slice(0, 3).join(", ")}${body.modules.length > 3 ? "..." : ""}`
+                    `[request] POST /bundle/${version} with ${modules.length} modules: ` +
+                    `${modules.slice(0, 3).join(", ")}${modules.length > 3 ? "..." : ""} `
                 );
 
                 try {
-                    const {outputFile, buildId, buildDir} = await buildBundle(version, body.modules);
-                    const cleanupDir = outputFile.includes(BUILDS_DIR) ? buildDir : undefined;
+                    // Build the bundle
+                    const {outputFile, buildId, buildDir} = await buildBundle(version, modules);
 
                     console.log(
                         `[request:${buildId.slice(0, 8)}] ` +
                         `ready to stream after ${(performance.now() - requestStart).toFixed(0)}ms`
                     );
 
-                    return streamFileAndCleanup(outputFile, buildId, cleanupDir);
+                    // Stream file and clean up build directory after streaming completes
+                    return streamFileAndCleanup(outputFile, buildId, buildDir);
                 } catch (error) {
                     const message = error instanceof Error ? error.message : "Build failed";
                     console.error(`[error] ${message}`);
@@ -265,8 +307,13 @@ const server = Bun.serve({
         },
         "/versions": {
             GET: async () => {
-                const versions = await getAvailableVersions();
-                return Response.json({versions});
+                try {
+                    const versions = await getAvailableVersions();
+                    return Response.json({versions});
+                } catch (error) {
+                    console.error("[error] Failed to get versions:", error);
+                    return Response.json({error: "Failed to retrieve versions"}, {status: 500});
+                }
             },
         },
         "/health": {
@@ -287,6 +334,16 @@ const server = Bun.serve({
             {status: 404}
         );
     },
+    error(error) {
+        console.error("[fatal] Unhandled error:", error);
+        return Response.json(
+            {error: "Internal server error"},
+            {status: 500}
+        );
+    },
 });
 
 console.log(`Server running at ${server.url}`);
+
+// Export server for programmatic use
+export {server};

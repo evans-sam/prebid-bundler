@@ -1,0 +1,45 @@
+# Prebid Bundler Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up --build              # Build and start with defaults
+#   docker-compose up -d                   # Start in detached mode
+#   docker-compose logs -f                 # Follow logs
+#   docker-compose down                    # Stop and remove containers
+#
+# Environment Variables (set in .env or shell):
+#   PREBID_COUNT    - Number of recent Prebid versions (default: 2)
+#   PREBID_VERSION  - Specific Prebid version to build
+#   PORT            - Host port to expose (default: 8787)
+#
+# Note: This file assumes you've run 'prebid-bundler init' and have the
+# Dockerfile in your project root, or you're running from within the
+# prebid-bundler package directory.
+
+services:
+  prebid-bundler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PREBID_COUNT: ${PREBID_COUNT:-2}
+        # Uncomment to build specific version:
+        # PREBID_VERSION: ${PREBID_VERSION:-}
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      - PORT=8787
+      - BUILD_TIMEOUT_MS=${BUILD_TIMEOUT_MS:-60000}
+    volumes:
+      # Persist cache across restarts
+      - prebid-cache:/usr/src/app/dist/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  prebid-cache:
+    name: prebid-bundler-cache
