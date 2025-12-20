@@ -1,0 +1,278 @@
+# Publish Prebid.js Docker Images to GitHub Container Registry
+#
+# This workflow automatically builds and publishes Docker images for new Prebid.js versions.
+# It checks for new releases and only builds images that don't already exist in the registry.
+#
+# Tagging Strategy (OCI Best Practices):
+#   - Full semver:    ghcr.io/<owner>/prebid-bundler:10.20.0
+#   - Major.minor:    ghcr.io/<owner>/prebid-bundler:10.20
+#   - Major:          ghcr.io/<owner>/prebid-bundler:10
+#   - Latest:         ghcr.io/<owner>/prebid-bundler:latest (most recent stable)
+#
+# Manual trigger allows building specific versions or a custom count of recent versions.
+
+name: Publish Prebid Images
+
+on:
+  # Run daily at 6 AM UTC to check for new Prebid releases
+  schedule:
+    - cron: "0 6 * * *"
+
+  # Allow manual trigger with options
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Specific Prebid version to build (e.g., 10.20.0). Leave empty to auto-detect new versions."
+        required: false
+        type: string
+      count:
+        description: "Number of recent versions to check/build (default: 5)"
+        required: false
+        default: "5"
+        type: string
+      force:
+        description: "Force rebuild even if image exists"
+        required: false
+        default: false
+        type: boolean
+
+  # Build on pushes to main that affect Docker-related files
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "docker/**"
+      - "src/**"
+      - ".github/workflows/publish-prebid-images.yml"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Discover which Prebid versions need to be built
+  discover-versions:
+    name: Discover Prebid Versions
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+      latest: ${{ steps.versions.outputs.latest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Discover versions to build
+        id: versions
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COUNT: ${{ inputs.count || '5' }}
+          INPUT_FORCE: ${{ inputs.force || 'false' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Fetch all Prebid.js release tags from GitHub API
+          echo "Fetching Prebid.js releases..."
+          PREBID_TAGS=$(curl -sL "https://api.github.com/repos/prebid/Prebid.js/tags?per_page=100" \
+            | jq -r '.[].name' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V -r)
+
+          # Get the latest version
+          LATEST_VERSION=$(echo "$PREBID_TAGS" | head -n1)
+          echo "Latest Prebid.js version: $LATEST_VERSION"
+          echo "latest=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+
+          # Determine which versions to check
+          if [ -n "$INPUT_VERSION" ]; then
+            # Specific version requested
+            VERSIONS_TO_CHECK="$INPUT_VERSION"
+          else
+            # Get N most recent versions
+            VERSIONS_TO_CHECK=$(echo "$PREBID_TAGS" | head -n "$INPUT_COUNT")
+          fi
+
+          echo "Versions to check: $(echo $VERSIONS_TO_CHECK | tr '\n' ' ')"
+
+          # Check which images already exist in the registry
+          VERSIONS_TO_BUILD=""
+          IMAGE_BASE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          IMAGE_BASE_LOWER=$(echo "$IMAGE_BASE" | tr '[:upper:]' '[:lower:]')
+
+          for VERSION in $VERSIONS_TO_CHECK; do
+            if [ "$INPUT_FORCE" = "true" ]; then
+              echo "Force build enabled, will build $VERSION"
+              VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $VERSION"
+            else
+              # Check if image exists using GitHub API
+              ESCAPED_TAG=$(echo "$VERSION" | sed 's/\./%2E/g')
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                "https://ghcr.io/v2/${IMAGE_BASE_LOWER#ghcr.io/}/manifests/$VERSION" 2>/dev/null || echo "000")
+
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "Image $VERSION already exists, skipping"
+              else
+                echo "Image $VERSION does not exist, will build"
+                VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $VERSION"
+              fi
+            fi
+          done
+
+          # Convert to JSON array
+          VERSIONS_TO_BUILD=$(echo "$VERSIONS_TO_BUILD" | xargs)
+          if [ -z "$VERSIONS_TO_BUILD" ]; then
+            echo "No versions to build"
+            echo 'versions=[]' >> "$GITHUB_OUTPUT"
+          else
+            JSON_ARRAY=$(echo "$VERSIONS_TO_BUILD" | tr ' ' '\n' | jq -R . | jq -sc .)
+            echo "Versions to build: $JSON_ARRAY"
+            echo "versions=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Build and push images for each version
+  build-and-push:
+    name: Build ${{ matrix.version }}
+    needs: discover-versions
+    if: needs.discover-versions.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.discover-versions.outputs.versions) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version components
+        id: version
+        run: |
+          VERSION="${{ matrix.version }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          echo "full=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
+
+          # Check if this is the latest version
+          if [ "$VERSION" = "${{ needs.discover-versions.outputs.latest }}" ]; then
+            echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Generate tags based on version
+          tags: |
+            # Full semantic version (e.g., 10.20.0)
+            type=raw,value=${{ steps.version.outputs.full }}
+            # Major.minor (e.g., 10.20)
+            type=raw,value=${{ steps.version.outputs.minor }}
+            # Major only (e.g., 10)
+            type=raw,value=${{ steps.version.outputs.major }}
+            # Latest tag for most recent version
+            type=raw,value=latest,enable=${{ steps.version.outputs.is_latest }}
+          # OCI Image Labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+          labels: |
+            org.opencontainers.image.title=Prebid Bundler
+            org.opencontainers.image.description=Prebid.js ${{ matrix.version }} bundler service
+            org.opencontainers.image.version=${{ matrix.version }}
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
+            org.opencontainers.image.licenses=MIT
+            io.prebid.version=${{ matrix.version }}
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PREBID_VERSION=${{ matrix.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Output image info
+        run: |
+          echo "## Built Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Prebid Version:** ${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Tags:**" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.meta.outputs.tags }}' | tr ',' '\n' | while read tag; do
+            echo "- \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  # Summary job
+  summary:
+    name: Build Summary
+    needs: [discover-versions, build-and-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# Prebid Image Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Latest Prebid Version:** ${{ needs.discover-versions.outputs.latest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Versions processed:** ${{ needs.discover-versions.outputs.versions }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Usage" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Pull the latest version" >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Pull a specific version" >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.discover-versions.outputs.latest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

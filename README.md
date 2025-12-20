@@ -134,6 +134,27 @@ curl http://localhost:8787/health
 
 ## Docker
 
+### Pre-built Images (Recommended)
+
+Pre-built images for each Prebid.js version are automatically published to GitHub Container Registry:
+
+```bash
+# Pull the latest version
+docker pull ghcr.io/evans-sam/prebid-bundler:latest
+
+# Pull a specific Prebid.js version
+docker pull ghcr.io/evans-sam/prebid-bundler:10.20.0
+
+# Pull by major.minor (gets latest patch)
+docker pull ghcr.io/evans-sam/prebid-bundler:10.20
+
+# Pull by major (gets latest minor.patch)
+docker pull ghcr.io/evans-sam/prebid-bundler:10
+
+# Run
+docker run -p 8787:8787 ghcr.io/evans-sam/prebid-bundler:10.20.0
+```
+
 ### Build from Source
 
 ```bash
@@ -198,8 +219,39 @@ prebid-bundler/
 ├── docker/              # Docker templates for init command
 ├── checkout.ts          # Prebid checkout script
 ├── Dockerfile           # Main Dockerfile
+├── .github/workflows/   # CI/CD workflows
 └── package.json
 ```
+
+## CI/CD
+
+### Automated Image Publishing
+
+The repository includes a GitHub Actions workflow that automatically builds and publishes Docker images for new Prebid.js releases.
+
+**Features:**
+- Runs daily at 6 AM UTC to check for new Prebid.js releases
+- Only builds images for versions that don't already exist
+- Multi-platform builds (linux/amd64, linux/arm64)
+- Semantic version tagging (full, major.minor, major, latest)
+- Build provenance attestation and SBOM generation
+- Manual trigger with options for specific versions or force rebuilds
+
+**Tagging Strategy:**
+
+| Tag | Example | Description |
+|-----|---------|-------------|
+| Full semver | `10.20.0` | Immutable, specific version |
+| Major.minor | `10.20` | Latest patch for this minor |
+| Major | `10` | Latest minor.patch for this major |
+| `latest` | - | Most recent stable release |
+
+**Manual Trigger:**
+
+You can manually trigger builds from the Actions tab:
+- **version**: Build a specific version (e.g., `10.20.0`)
+- **count**: Number of recent versions to check (default: 5)
+- **force**: Rebuild even if the image already exists
 
 ## License
 
