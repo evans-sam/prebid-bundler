@@ -1,2 +1,6 @@
 [test]
 root = "./src"
+coverage = true
+coverageReporter = ["text"]
+coverageSkipTestFiles = true
+coverageThreshold = 0.5
