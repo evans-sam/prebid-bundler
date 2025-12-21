@@ -8,6 +8,9 @@
 #
 # Build with specific version:
 #   docker build --build-arg PREBID_VERSION=10.20.0 -t prebid-bundler:10.20.0 .
+#
+# Build with custom global variable name:
+#   docker build --build-arg PREBID_GLOBAL_VAR_NAME=myPrebid -t prebid-bundler .
 
 FROM oven/bun:1 AS base
 WORKDIR /usr/src/app
@@ -36,12 +39,17 @@ COPY checkout.ts .
 # ARGs declared after cacheable layers - changing version won't invalidate apt/npm cache
 ARG PREBID_VERSION
 ARG PREBID_COUNT=2
+ARG PREBID_GLOBAL_VAR_NAME
 
 # Run checkout - ownership is set via COPY --chown in release stage
-RUN if [ -n "$PREBID_VERSION" ]; then \
-        bun checkout.ts --version "$PREBID_VERSION"; \
+RUN GLOBAL_ARG=""; \
+    if [ -n "$PREBID_GLOBAL_VAR_NAME" ]; then \
+        GLOBAL_ARG="--global-var-name $PREBID_GLOBAL_VAR_NAME"; \
+    fi; \
+    if [ -n "$PREBID_VERSION" ]; then \
+        bun checkout.ts --version "$PREBID_VERSION" $GLOBAL_ARG; \
     else \
-        bun checkout.ts --count "$PREBID_COUNT"; \
+        bun checkout.ts --count "$PREBID_COUNT" $GLOBAL_ARG; \
     fi
 
 # Final image

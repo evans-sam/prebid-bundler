@@ -7,6 +7,6 @@
  *
  * For full documentation, run: prebid-bundler checkout --help
  */
-import { checkout } from "./src/commands/checkout.ts";
+import { checkout } from "./src";
 
 await checkout(Bun.argv.slice(2));

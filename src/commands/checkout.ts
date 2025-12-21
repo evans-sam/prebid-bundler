@@ -8,6 +8,7 @@ interface CheckoutOptions {
   count: number;
   keep: boolean;
   outputDir: string;
+  globalVarName?: string;
 }
 
 export async function checkout(args: string[]) {
@@ -18,6 +19,7 @@ export async function checkout(args: string[]) {
       count: { type: "string", short: "n" },
       keep: { type: "boolean", short: "k" },
       output: { type: "string", short: "o" },
+      "global-var-name": { type: "string", short: "g" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: true,
@@ -30,11 +32,12 @@ prebid-bundler checkout - Clone and build Prebid.js versions
 Usage: prebid-bundler checkout [options]
 
 Options:
-  -v, --version <tag>   Checkout a specific version (can be repeated)
-  -n, --count <num>     Checkout the N most recent versions (default: 2)
-  -k, --keep            Keep the working master clone for faster subsequent runs
-  -o, --output <dir>    Output directory (default: ./dist/prebid.js)
-  -h, --help            Show this help message
+  -v, --version <tag>       Checkout a specific version (can be repeated)
+  -n, --count <num>         Checkout the N most recent versions (default: 2)
+  -k, --keep                Keep the working master clone for faster subsequent runs
+  -o, --output <dir>        Output directory (default: ./dist/prebid.js)
+  -g, --global-var-name <n> Set the Prebid global variable name (default: pbjs)
+  -h, --help                Show this help message
 
 Examples:
   prebid-bundler checkout                      # Checkout 2 most recent versions
@@ -42,6 +45,7 @@ Examples:
   prebid-bundler checkout -v 10.20.0           # Checkout specific version
   prebid-bundler checkout -v 10.20.0 -v 9.0.0  # Checkout multiple specific versions
   prebid-bundler checkout -n 3 --keep          # Keep working clone for faster runs
+  prebid-bundler checkout -g myPrebid          # Use custom global variable name
 `);
     process.exit(0);
   }
@@ -55,13 +59,15 @@ Examples:
       2,
     keep: values.keep || process.env.KEEP_WORKING_MASTER === "true",
     outputDir: values.output ?? resolve("dist/prebid.js"),
+    globalVarName:
+      values["global-var-name"] || process.env.PREBID_GLOBAL_VAR_NAME,
   };
 
   await checkoutVersions(options);
 }
 
 export async function checkoutVersions(options: CheckoutOptions) {
-  const { versions, count, keep, outputDir } = options;
+  const { versions, count, keep, outputDir, globalVarName } = options;
 
   if (!existsSync(outputDir)) {
     mkdirSync(outputDir, { recursive: true });
@@ -104,6 +110,16 @@ export async function checkoutVersions(options: CheckoutOptions) {
       try {
         await $`cp -R ${workingMasterPath} ${dirName}`;
         await $`git -C ${dirName} checkout ${tag}`.quiet();
+
+        // Modify package.json if globalVarName is specified
+        if (globalVarName) {
+          const pkgPath = join(dirName, "package.json");
+          const pkg = await Bun.file(pkgPath).json();
+          pkg.globalVarName = globalVarName;
+          await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
+          console.log(`  Set globalVarName to "${globalVarName}"`);
+        }
+
         await $`cd ${dirName} && npm install && npx gulp build`;
         console.log(`${tag} installed`);
         successCount++;
