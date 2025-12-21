@@ -216,9 +216,9 @@ prebid-bundler/
 │   ├── index.ts         # HTTP server
 │   ├── utils.ts         # Version parsing utilities
 │   └── commands/        # CLI command implementations
-├── docker/              # Docker templates for init command
+├── docker/              # Templates for init command (.dockerignore, docker-compose.yml)
 ├── checkout.ts          # Prebid checkout script
-├── Dockerfile           # Main Dockerfile
+├── Dockerfile           # Docker build configuration
 ├── .github/workflows/   # CI/CD workflows
 └── package.json
 ```

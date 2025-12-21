@@ -1,8 +1,7 @@
-import { parseArgs } from "util";
-import { resolve, dirname, join, relative } from "path";
-import { existsSync, mkdirSync, readdirSync, statSync } from "fs";
-import { fileURLToPath } from "url";
-import { $ } from "bun";
+import {parseArgs} from "util";
+import {dirname, join, resolve} from "path";
+import {existsSync, mkdirSync, readdirSync} from "fs";
+import {fileURLToPath} from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,27 +11,27 @@ const PACKAGE_ROOT = resolve(__dirname, "../..");
 const DOCKER_DIR = resolve(PACKAGE_ROOT, "docker");
 
 interface InitOptions {
-  force: boolean;
-  outputDir: string;
-  withCompose: boolean;
-  full: boolean;
+    force: boolean;
+    full: boolean;
+    outputDir: string;
+    withCompose: boolean;
 }
 
 export async function init(args: string[]) {
-  const { values } = parseArgs({
-    args,
-    options: {
-      help: { type: "boolean", short: "h" },
-      force: { type: "boolean", short: "f" },
-      output: { type: "string", short: "o" },
-      compose: { type: "boolean", short: "c" },
-      full: { type: "boolean" },
-    },
-    allowPositionals: false,
-  });
+    const {values} = parseArgs({
+        args,
+        options: {
+            help: {type: "boolean", short: "h"},
+            force: {type: "boolean", short: "f"},
+            output: {type: "string", short: "o"},
+            compose: {type: "boolean", short: "c"},
+            full: {type: "boolean"},
+        },
+        allowPositionals: false,
+    });
 
-  if (values.help) {
-    console.log(`
+    if (values.help) {
+        console.log(`
 prebid-bundler init - Initialize Docker files in your project
 
 Usage: prebid-bundler init [options]
@@ -59,114 +58,114 @@ Examples:
   prebid-bundler init --compose        # Include docker-compose.yml
   prebid-bundler init -o ./docker      # Output to ./docker directory
 `);
-    process.exit(0);
-  }
+        process.exit(0);
+    }
 
-  const options: InitOptions = {
-    force: values.force ?? false,
-    outputDir: values.output ?? process.cwd(),
-    withCompose: values.compose ?? false,
-    full: values.full ?? false,
-  };
+    const options: InitOptions = {
+        force: values.force ?? false,
+        outputDir: values.output ?? process.cwd(),
+        withCompose: values.compose ?? false,
+        full: values.full ?? false,
+    };
 
-  await initDockerFiles(options);
+    await initDockerFiles(options);
 }
 
 async function copyDirectory(src: string, dest: string, force: boolean): Promise<{ copied: number; skipped: number }> {
-  let copied = 0;
-  let skipped = 0;
+    let copied = 0;
+    let skipped = 0;
 
-  if (!existsSync(dest)) {
-    mkdirSync(dest, { recursive: true });
-  }
-
-  const entries = readdirSync(src, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const srcPath = join(src, entry.name);
-    const destPath = join(dest, entry.name);
-
-    if (entry.isDirectory()) {
-      const result = await copyDirectory(srcPath, destPath, force);
-      copied += result.copied;
-      skipped += result.skipped;
-    } else {
-      if (existsSync(destPath) && !force) {
-        skipped++;
-      } else {
-        const content = await Bun.file(srcPath).arrayBuffer();
-        await Bun.write(destPath, content);
-        copied++;
-      }
+    if (!existsSync(dest)) {
+        mkdirSync(dest, {recursive: true});
     }
-  }
 
-  return { copied, skipped };
+    const entries = readdirSync(src, {withFileTypes: true});
+
+    for (const entry of entries) {
+        const srcPath = join(src, entry.name);
+        const destPath = join(dest, entry.name);
+
+        if (entry.isDirectory()) {
+            const result = await copyDirectory(srcPath, destPath, force);
+            copied += result.copied;
+            skipped += result.skipped;
+        } else {
+            if (existsSync(destPath) && !force) {
+                skipped++;
+            } else {
+                const content = await Bun.file(srcPath).arrayBuffer();
+                await Bun.write(destPath, content);
+                copied++;
+            }
+        }
+    }
+
+    return {copied, skipped};
 }
 
 async function initDockerFiles(options: InitOptions) {
-  const { force, outputDir, withCompose, full } = options;
+    const {force, outputDir, withCompose, full} = options;
 
-  // Ensure output directory exists
-  if (!existsSync(outputDir)) {
-    mkdirSync(outputDir, { recursive: true });
-  }
-
-  let copiedCount = 0;
-  let skippedCount = 0;
-
-  if (full) {
-    // Full mode: copy all source files for standalone builds
-    console.log("Initializing full prebid-bundler setup...\n");
-
-    // Copy source directory
-    console.log("  Copying src/...");
-    const srcResult = await copyDirectory(
-      join(PACKAGE_ROOT, "src"),
-      join(outputDir, "src"),
-      force
-    );
-    copiedCount += srcResult.copied;
-    skippedCount += srcResult.skipped;
-    console.log(`    ${srcResult.copied} files copied, ${srcResult.skipped} skipped`);
-
-    // Copy individual files
-    const filesToCopy = [
-      { src: join(DOCKER_DIR, "Dockerfile"), dest: "Dockerfile" },
-      { src: join(DOCKER_DIR, ".dockerignore"), dest: ".dockerignore" },
-      { src: join(PACKAGE_ROOT, "checkout.ts"), dest: "checkout.ts" },
-      { src: join(PACKAGE_ROOT, "package.json"), dest: "package.json" },
-    ];
-
-    if (existsSync(join(PACKAGE_ROOT, "bun.lock"))) {
-      filesToCopy.push({ src: join(PACKAGE_ROOT, "bun.lock"), dest: "bun.lock" });
+    // Ensure output directory exists
+    if (!existsSync(outputDir)) {
+        mkdirSync(outputDir, {recursive: true});
     }
 
-    if (withCompose) {
-      filesToCopy.push({ src: join(DOCKER_DIR, "docker-compose.yml"), dest: "docker-compose.yml" });
-    }
+    let copiedCount = 0;
+    let skippedCount = 0;
 
-    for (const file of filesToCopy) {
-      const destPath = join(outputDir, file.dest);
+    if (full) {
+        // Full mode: copy all source files for standalone builds
+        console.log("Initializing full prebid-bundler setup...\n");
 
-      if (!existsSync(file.src)) {
-        console.warn(`  Warning: Source file not found: ${file.src}`);
-        continue;
-      }
+        // Copy source directory
+        console.log("  Copying src/...");
+        const srcResult = await copyDirectory(
+            join(PACKAGE_ROOT, "src"),
+            join(outputDir, "src"),
+            force
+        );
+        copiedCount += srcResult.copied;
+        skippedCount += srcResult.skipped;
+        console.log(`    ${srcResult.copied} files copied, ${srcResult.skipped} skipped`);
 
-      if (existsSync(destPath) && !force) {
-        console.log(`  Skipped: ${file.dest} (already exists)`);
-        skippedCount++;
-        continue;
-      }
+        // Copy individual files
+        const filesToCopy = [
+            {src: join(PACKAGE_ROOT, "Dockerfile"), dest: "Dockerfile"},
+            {src: join(DOCKER_DIR, ".dockerignore"), dest: ".dockerignore"},
+            {src: join(PACKAGE_ROOT, "checkout.ts"), dest: "checkout.ts"},
+            {src: join(PACKAGE_ROOT, "package.json"), dest: "package.json"},
+        ];
 
-      const content = await Bun.file(file.src).arrayBuffer();
-      await Bun.write(destPath, content);
-      console.log(`  Created: ${file.dest}`);
-      copiedCount++;
-    }
+        if (existsSync(join(PACKAGE_ROOT, "bun.lock"))) {
+            filesToCopy.push({src: join(PACKAGE_ROOT, "bun.lock"), dest: "bun.lock"});
+        }
 
-    console.log(`
+        if (withCompose) {
+            filesToCopy.push({src: join(DOCKER_DIR, "docker-compose.yml"), dest: "docker-compose.yml"});
+        }
+
+        for (const file of filesToCopy) {
+            const destPath = join(outputDir, file.dest);
+
+            if (!existsSync(file.src)) {
+                console.warn(`  Warning: Source file not found: ${file.src}`);
+                continue;
+            }
+
+            if (existsSync(destPath) && !force) {
+                console.log(`  Skipped: ${file.dest} (already exists)`);
+                skippedCount++;
+                continue;
+            }
+
+            const content = await Bun.file(file.src).arrayBuffer();
+            await Bun.write(destPath, content);
+            console.log(`  Created: ${file.dest}`);
+            copiedCount++;
+        }
+
+        console.log(`
 Done! ${copiedCount} file(s) created, ${skippedCount} skipped.
 
 Your project now contains a standalone prebid-bundler setup.
@@ -182,21 +181,21 @@ Next steps:
      docker build --build-arg PREBID_VERSION=10.20.0 -t my-prebid-bundler .
      docker build --build-arg PREBID_COUNT=5 -t my-prebid-bundler .
 ${
-  withCompose
-    ? `
+            withCompose
+                ? `
   Or use docker-compose:
      docker-compose up --build
 `
-    : ""
-}
+                : ""
+        }
 You can now customize the source code as needed.
 `);
-  } else {
-    // Minimal mode: just Docker files that reference node_modules
-    console.log("Initializing Docker files (minimal mode)...\n");
+    } else {
+        // Minimal mode: just Docker files that reference node_modules
+        console.log("Initializing Docker files (minimal mode)...\n");
 
-    // Create a Dockerfile that uses node_modules as context
-    const dockerfileContent = `# Prebid Bundler Docker Image
+        // Create a Dockerfile that uses node_modules as context
+        const dockerfileContent = `# Prebid Bundler Docker Image
 #
 # This Dockerfile builds from your node_modules/prebid-bundler package.
 # To customize the bundler itself, run: prebid-bundler init --full
@@ -262,7 +261,7 @@ EXPOSE 8787/tcp
 ENTRYPOINT ["bun", "run", "src/index.ts"]
 `;
 
-    const dockerignoreContent = `# Dependencies (we copy from node_modules/prebid-bundler specifically)
+        const dockerignoreContent = `# Dependencies (we copy from node_modules/prebid-bundler specifically)
 node_modules/
 !node_modules/prebid-bundler/
 
@@ -300,7 +299,7 @@ coverage/
 *.md
 `;
 
-    const composeContent = `# Prebid Bundler Docker Compose Configuration
+        const composeContent = `# Prebid Bundler Docker Compose Configuration
 #
 # Usage:
 #   docker-compose up --build              # Build and start with defaults
@@ -342,30 +341,30 @@ volumes:
     name: prebid-bundler-cache
 `;
 
-    const filesToWrite = [
-      { content: dockerfileContent, dest: "Dockerfile" },
-      { content: dockerignoreContent, dest: ".dockerignore" },
-    ];
+        const filesToWrite = [
+            {content: dockerfileContent, dest: "Dockerfile"},
+            {content: dockerignoreContent, dest: ".dockerignore"},
+        ];
 
-    if (withCompose) {
-      filesToWrite.push({ content: composeContent, dest: "docker-compose.yml" });
-    }
+        if (withCompose) {
+            filesToWrite.push({content: composeContent, dest: "docker-compose.yml"});
+        }
 
-    for (const file of filesToWrite) {
-      const destPath = join(outputDir, file.dest);
+        for (const file of filesToWrite) {
+            const destPath = join(outputDir, file.dest);
 
-      if (existsSync(destPath) && !force) {
-        console.log(`  Skipped: ${file.dest} (already exists, use --force to overwrite)`);
-        skippedCount++;
-        continue;
-      }
+            if (existsSync(destPath) && !force) {
+                console.log(`  Skipped: ${file.dest} (already exists, use --force to overwrite)`);
+                skippedCount++;
+                continue;
+            }
 
-      await Bun.write(destPath, file.content);
-      console.log(`  Created: ${file.dest}`);
-      copiedCount++;
-    }
+            await Bun.write(destPath, file.content);
+            console.log(`  Created: ${file.dest}`);
+            copiedCount++;
+        }
 
-    console.log(`
+        console.log(`
 Done! ${copiedCount} file(s) created, ${skippedCount} skipped.
 
 Next steps:
@@ -379,14 +378,14 @@ Next steps:
      docker build --build-arg PREBID_VERSION=10.20.0 -t my-prebid-bundler .
      docker build --build-arg PREBID_COUNT=5 -t my-prebid-bundler .
 ${
-  withCompose
-    ? `
+            withCompose
+                ? `
   Or use docker-compose:
      docker-compose up --build
 `
-    : ""
-}
+                : ""
+        }
 To customize the bundler source code, run: prebid-bundler init --full
 `);
-  }
+    }
 }

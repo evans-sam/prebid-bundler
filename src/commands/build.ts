@@ -9,8 +9,7 @@ const __dirname = dirname(__filename);
 
 // Package root is two levels up from src/commands/
 const PACKAGE_ROOT = resolve(__dirname, "../..");
-const DOCKER_DIR = resolve(PACKAGE_ROOT, "docker");
-const DOCKERFILE_PATH = resolve(DOCKER_DIR, "Dockerfile");
+const DOCKERFILE_PATH = resolve(PACKAGE_ROOT, "Dockerfile");
 
 interface BuildOptions {
   versions?: string[];

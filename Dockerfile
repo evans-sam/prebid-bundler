@@ -22,10 +22,9 @@ RUN cd /temp/prod && bun install --frozen-lockfile --production
 # PREBID_VERSION: specific version tag (e.g., 10.20.0)
 # PREBID_COUNT: number of recent versions to checkout (default: 2)
 FROM base AS prebid
-ARG PREBID_VERSION
-ARG PREBID_COUNT=2
 
-# Install git and npm (required for checkout and building Prebid.js)
+# Install git and npm BEFORE ARGs to maximize layer caching
+# These layers are identical across all Prebid versions
 RUN apt-get update && apt-get install -y --no-install-recommends git npm \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,6 +32,10 @@ COPY --from=install /temp/prod/node_modules node_modules
 COPY package.json bun.lock ./
 COPY src ./src
 COPY checkout.ts .
+
+# ARGs declared after cacheable layers - changing version won't invalidate apt/npm cache
+ARG PREBID_VERSION
+ARG PREBID_COUNT=2
 
 # Run checkout - ownership is set via COPY --chown in release stage
 RUN if [ -n "$PREBID_VERSION" ]; then \
