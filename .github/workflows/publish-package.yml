@@ -1,4 +1,6 @@
 # Publish npm package when a GitHub release is created
+# Uses npm trusted publishers (OIDC) for authentication
+# See: https://docs.npmjs.com/trusted-publishers
 name: Publish Package
 
 on:
@@ -26,12 +28,6 @@ jobs:
       - name: Run tests
         run: bun test
 
-      - name: Setup Node.js for npm publish
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
       - name: Verify version matches release tag
         run: |
           PACKAGE_VERSION=$(jq -r '.version' package.json)
@@ -47,6 +43,4 @@ jobs:
           echo "Version verified: $PACKAGE_VERSION"
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun publish --access public --provenance
