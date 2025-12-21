@@ -1,4 +1,4 @@
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 
 export async function serve(args: string[]) {
   const { values } = parseArgs({

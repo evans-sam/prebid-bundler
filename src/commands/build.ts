@@ -1,8 +1,8 @@
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { $ } from "bun";
-import { parseArgs } from "util";
-import { resolve, dirname } from "path";
-import { existsSync } from "fs";
-import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -88,17 +88,7 @@ Notes:
 }
 
 async function buildDockerImage(options: BuildOptions) {
-  const {
-    versions,
-    count,
-    tag,
-    push,
-    platform,
-    buildContext,
-    dockerfile,
-    noCache,
-    quiet,
-  } = options;
+  const { versions, count, tag, push, platform, buildContext, dockerfile, noCache, quiet } = options;
 
   // Determine Dockerfile location
   const dockerfilePath = dockerfile ?? DOCKERFILE_PATH;

@@ -28,7 +28,13 @@
     "checkout": "bun run checkout.ts",
     "test": "bun test",
     "docker:build": "bun run bin/cli.ts build",
-    "prepublishOnly": "bun test"
+    "prepublishOnly": "bun test",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
   },
   "keywords": [
     "prebid",
@@ -46,6 +52,7 @@
     "bun": ">=1.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.3.10",
     "@types/bun": "latest",
     "@types/semver": "^7.7.1"
   },

@@ -1,7 +1,7 @@
-import { $ } from "bun";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
+import { $ } from "bun";
 
 interface CheckoutOptions {
   versions?: string[];
@@ -49,9 +49,9 @@ Examples:
   const options: CheckoutOptions = {
     versions: values.version,
     count:
-      parseInt(values.count ?? "") ||
-      parseInt(positionals[0] ?? "") ||
-      parseInt(process.env.NUMBER_OF_PREVIOUS_VERSIONS || "") ||
+      parseInt(values.count ?? "", 10) ||
+      parseInt(positionals[0] ?? "", 10) ||
+      parseInt(process.env.NUMBER_OF_PREVIOUS_VERSIONS || "", 10) ||
       2,
     keep: values.keep || process.env.KEEP_WORKING_MASTER === "true",
     outputDir: values.output ?? resolve("dist/prebid.js"),
@@ -82,13 +82,10 @@ export async function checkoutVersions(options: CheckoutOptions) {
   if (versions && versions.length > 0) {
     // Specific versions requested
     tags = versions;
-    console.log(
-      `=====> Checking out ${tags.length} specific version(s): ${tags.join(", ")}`
-    );
+    console.log(`=====> Checking out ${tags.length} specific version(s): ${tags.join(", ")}`);
   } else {
     // Get N most recent versions
-    const tagsOutput =
-      await $`git -C ${workingMasterPath} tag --sort=-creatordate`.text();
+    const tagsOutput = await $`git -C ${workingMasterPath} tag --sort=-creatordate`.text();
     tags = tagsOutput.trim().split("\n").slice(0, count);
     console.log(`=====> Checking out ${count} most recent version(s)`);
   }
@@ -111,10 +108,7 @@ export async function checkoutVersions(options: CheckoutOptions) {
         console.log(`${tag} installed`);
         successCount++;
       } catch (error) {
-        console.error(
-          `Failed to build ${tag}:`,
-          error instanceof Error ? error.message : error
-        );
+        console.error(`Failed to build ${tag}:`, error instanceof Error ? error.message : error);
         if (existsSync(dirName)) {
           rmSync(dirName, { recursive: true, force: true });
         }
