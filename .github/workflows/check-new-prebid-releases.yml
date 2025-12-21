@@ -1,59 +1,34 @@
-# Rebuild All Prebid.js Docker Images
+# Check for New Prebid.js Releases Daily
 #
-# This workflow rebuilds ALL Prebid.js images when:
-#   - A new release of this repository is published
-#   - Manually triggered (with options to customize)
+# This workflow runs daily to check for new Prebid.js releases and builds
+# Docker images only for versions that don't already exist in the registry.
 #
-# Use this for major updates to the bundler that require rebuilding all images.
-# For daily new Prebid.js version detection, see: check-new-prebid-releases.yml
-#
-# Tagging Strategy (OCI Best Practices):
-#   - Full semver:    ghcr.io/<owner>/prebid-bundler:10.20.0
-#   - Major.minor:    ghcr.io/<owner>/prebid-bundler:10.20
-#   - Major:          ghcr.io/<owner>/prebid-bundler:10
-#   - Latest:         ghcr.io/<owner>/prebid-bundler:latest (most recent stable)
+# For rebuilding ALL images (e.g., after bundler updates), use: publish-prebid-images.yml
 
-name: Rebuild All Prebid Images
+name: Check New Prebid Releases
 
 on:
-  # Rebuild all images when a new release of this repo is published
-  release:
-    types: [published]
+  # Run daily at 6 AM UTC
+  schedule:
+    - cron: "0 6 * * *"
 
-  # Allow manual trigger with options
+  # Allow manual trigger
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Specific Prebid version to build (e.g., 10.20.0). Leave empty to build recent versions."
-        required: false
-        type: string
-      count:
-        description: "Number of recent versions to build (default: 10)"
-        required: false
-        default: "10"
-        type: string
-      force:
-        description: "Force rebuild even if image exists"
-        required: false
-        default: true
-        type: boolean
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Discover which Prebid versions to build
-  discover-versions:
-    name: Discover Prebid Versions
+  # Check for new Prebid.js versions
+  check-new-versions:
+    name: Check for New Versions
     runs-on: ubuntu-latest
     outputs:
-      versions: ${{ steps.versions.outputs.versions }}
-      latest: ${{ steps.versions.outputs.latest }}
+      versions: ${{ steps.check.outputs.versions }}
+      latest: ${{ steps.check.outputs.latest }}
+      has_new: ${{ steps.check.outputs.has_new }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
@@ -61,20 +36,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Discover versions to build
-        id: versions
+      - name: Check for new Prebid.js versions
+        id: check
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_COUNT: ${{ inputs.count || '10' }}
-          INPUT_FORCE: ${{ inputs.force || 'true' }}
-          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Fetch all Prebid.js release tags from GitHub API
+          # Fetch recent Prebid.js release tags from GitHub API
           echo "Fetching Prebid.js releases..."
-          PREBID_TAGS=$(curl -sL "https://api.github.com/repos/prebid/Prebid.js/tags?per_page=100" \
+          PREBID_TAGS=$(curl -sL "https://api.github.com/repos/prebid/Prebid.js/tags?per_page=20" \
             | jq -r '.[].name' \
             | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | sort -V -r)
@@ -84,63 +55,43 @@ jobs:
           echo "Latest Prebid.js version: $LATEST_VERSION"
           echo "latest=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
 
-          # For release events, always force rebuild
-          if [ "$EVENT_NAME" = "release" ]; then
-            INPUT_FORCE="true"
-            echo "Release event detected - forcing rebuild of all images"
-          fi
-
-          # Determine which versions to check
-          if [ -n "$INPUT_VERSION" ]; then
-            # Specific version requested
-            VERSIONS_TO_CHECK="$INPUT_VERSION"
-          else
-            # Get N most recent versions
-            VERSIONS_TO_CHECK=$(echo "$PREBID_TAGS" | head -n "$INPUT_COUNT")
-          fi
-
-          echo "Versions to check: $(echo $VERSIONS_TO_CHECK | tr '\n' ' ')"
-
           # Check which images already exist in the registry
-          VERSIONS_TO_BUILD=""
+          NEW_VERSIONS=""
           IMAGE_BASE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           IMAGE_BASE_LOWER=$(echo "$IMAGE_BASE" | tr '[:upper:]' '[:lower:]')
 
-          for VERSION in $VERSIONS_TO_CHECK; do
-            if [ "$INPUT_FORCE" = "true" ]; then
-              echo "Force build enabled, will build $VERSION"
-              VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $VERSION"
-            else
-              # Check if image exists using GitHub API
-              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                "https://ghcr.io/v2/${IMAGE_BASE_LOWER#ghcr.io/}/manifests/$VERSION" 2>/dev/null || echo "000")
+          # Check the 5 most recent versions
+          for VERSION in $(echo "$PREBID_TAGS" | head -n 5); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://ghcr.io/v2/${IMAGE_BASE_LOWER#ghcr.io/}/manifests/$VERSION" 2>/dev/null || echo "000")
 
-              if [ "$HTTP_CODE" = "200" ]; then
-                echo "Image $VERSION already exists, skipping"
-              else
-                echo "Image $VERSION does not exist, will build"
-                VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $VERSION"
-              fi
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Image $VERSION already exists"
+            else
+              echo "NEW: Image $VERSION does not exist, will build"
+              NEW_VERSIONS="$NEW_VERSIONS $VERSION"
             fi
           done
 
           # Convert to JSON array
-          VERSIONS_TO_BUILD=$(echo "$VERSIONS_TO_BUILD" | xargs)
-          if [ -z "$VERSIONS_TO_BUILD" ]; then
-            echo "No versions to build"
+          NEW_VERSIONS=$(echo "$NEW_VERSIONS" | xargs)
+          if [ -z "$NEW_VERSIONS" ]; then
+            echo "No new versions to build"
             echo 'versions=[]' >> "$GITHUB_OUTPUT"
+            echo 'has_new=false' >> "$GITHUB_OUTPUT"
           else
-            JSON_ARRAY=$(echo "$VERSIONS_TO_BUILD" | tr ' ' '\n' | jq -R . | jq -sc .)
-            echo "Versions to build: $JSON_ARRAY"
+            JSON_ARRAY=$(echo "$NEW_VERSIONS" | tr ' ' '\n' | jq -R . | jq -sc .)
+            echo "New versions to build: $JSON_ARRAY"
             echo "versions=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
+            echo 'has_new=true' >> "$GITHUB_OUTPUT"
           fi
 
-  # Build and push images for each version
-  build-and-push:
+  # Build and push images for new versions only
+  build-new-version:
     name: Build ${{ matrix.version }}
-    needs: discover-versions
-    if: needs.discover-versions.outputs.versions != '[]'
+    needs: check-new-versions
+    if: needs.check-new-versions.outputs.has_new == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -150,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJson(needs.discover-versions.outputs.versions) }}
+        version: ${{ fromJson(needs.check-new-versions.outputs.versions) }}
 
     steps:
       - name: Checkout repository
@@ -172,14 +123,13 @@ jobs:
           VERSION="${{ matrix.version }}"
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
 
           echo "full=$VERSION" >> "$GITHUB_OUTPUT"
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
 
           # Check if this is the latest version
-          if [ "$VERSION" = "${{ needs.discover-versions.outputs.latest }}" ]; then
+          if [ "$VERSION" = "${{ needs.check-new-versions.outputs.latest }}" ]; then
             echo "is_latest=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_latest=false" >> "$GITHUB_OUTPUT"
@@ -233,39 +183,37 @@ jobs:
 
       - name: Output image info
         run: |
-          echo "## Built Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "## New Prebid.js Version Built" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Prebid Version:** ${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** ${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Tags:**" >> "$GITHUB_STEP_SUMMARY"
-          echo '${{ steps.meta.outputs.tags }}' | tr ',' '\n' | while read tag; do
-            echo "- \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
-          done
 
   # Summary job
   summary:
-    name: Build Summary
-    needs: [discover-versions, build-and-push]
+    name: Daily Check Summary
+    needs: [check-new-versions, build-new-version]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Generate summary
         run: |
-          echo "# Prebid Image Rebuild Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Daily Prebid.js Release Check" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Trigger:** ${{ github.event_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Latest Prebid.js Version:** ${{ needs.check-new-versions.outputs.latest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Latest Prebid Version:** ${{ needs.discover-versions.outputs.latest }}" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.check-new-versions.outputs.has_new }}" = "true" ]; then
+            echo "**New versions built:** ${{ needs.check-new-versions.outputs.versions }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Status:** No new Prebid.js versions detected. All recent versions already have images." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Versions rebuilt:** ${{ needs.discover-versions.outputs.versions }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "## Usage" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Pull Latest" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_STEP_SUMMARY"
-          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.discover-versions.outputs.latest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
