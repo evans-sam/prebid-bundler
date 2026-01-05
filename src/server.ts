@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseVersion } from "./utils.ts";
+import { file } from "bun";
 
 export interface ServerConfig {
   prebidDir: string;
@@ -88,6 +89,31 @@ export async function getModulesForVersion(prebidDir: string, version: string): 
 
 export interface BundleRequest {
   modules: string[];
+  globalVarName?: string;
+}
+
+export async function setGlobalVarName(
+  versionDir: string,
+  globalVarName: string,
+): Promise<string> {
+  const packageJsonPath = join(versionDir, "package.json");
+  const packageJsonFile = file(packageJsonPath);
+  const packageJson = await packageJsonFile.json();
+  const originalGlobalVarName = packageJson.globalVarName;
+  packageJson.globalVarName = globalVarName;
+  await Bun.write(packageJsonPath, JSON.stringify(packageJson, null, 2) + "\n");
+  return originalGlobalVarName;
+}
+
+export async function restoreGlobalVarName(
+  versionDir: string,
+  originalGlobalVarName: string,
+): Promise<void> {
+  const packageJsonPath = join(versionDir, "package.json");
+  const packageJsonFile = file(packageJsonPath);
+  const packageJson = await packageJsonFile.json();
+  packageJson.globalVarName = originalGlobalVarName;
+  await Bun.write(packageJsonPath, JSON.stringify(packageJson, null, 2) + "\n");
 }
 
 export interface BuildResult {
@@ -96,7 +122,14 @@ export interface BuildResult {
   outputFile: string;
 }
 
-export async function buildBundle(config: ServerConfig, version: string, modules: string[]): Promise<BuildResult> {
+interface BuildBundleParams {
+  config: ServerConfig;
+  version: string;
+  modules: string[];
+  globalVarName?: string;
+}
+
+export async function buildBundle({config, version, modules, globalVarName}: BuildBundleParams): Promise<BuildResult> {
   const totalStart = performance.now();
   const buildId = crypto.randomUUID();
   const spawn = config.spawn || Bun.spawn;
@@ -109,6 +142,12 @@ export async function buildBundle(config: ServerConfig, version: string, modules
   }
   const validationTime = performance.now() - validationStart;
 
+  // Phase 1.5: Set globalVarName in package.json if provided
+  let originalGlobalVarName: string | undefined;
+  if (globalVarName) {
+    originalGlobalVarName = await setGlobalVarName(versionDir, globalVarName);
+  }
+
   // Phase 2: Directory setup
   const dirSetupStart = performance.now();
   const buildDir = join(config.buildsDir, buildId);
@@ -116,9 +155,11 @@ export async function buildBundle(config: ServerConfig, version: string, modules
   const dirSetupTime = performance.now() - dirSetupStart;
 
   // Phase 3: Gulp build with timeout
+  // Use 'gulp build' when globalVarName is set, otherwise use 'gulp bundle'
   const gulpStart = performance.now();
   const modulesArg = modules.join(",");
-  const proc = spawn(["npx", "gulp", "bundle", `--modules=${modulesArg}`], {
+  const gulpCommand = globalVarName ? "build" : "bundle";
+  const proc = spawn(["npx", "gulp", gulpCommand, `--modules=${modulesArg}`], {
     cwd: versionDir,
     stdout: "pipe",
     stderr: "pipe",
@@ -139,10 +180,19 @@ export async function buildBundle(config: ServerConfig, version: string, modules
   try {
     exitCode = await Promise.race([proc.exited, timeoutPromise]);
   } catch (error) {
+    // Restore original globalVarName before cleanup
+    if (originalGlobalVarName !== undefined) {
+      await restoreGlobalVarName(versionDir, originalGlobalVarName);
+    }
     await cleanupBuildDir(buildDir, buildId);
     throw error;
   }
   const gulpTime = performance.now() - gulpStart;
+
+  // Restore original globalVarName after build
+  if (originalGlobalVarName !== undefined) {
+    await restoreGlobalVarName(versionDir, originalGlobalVarName);
+  }
 
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
@@ -244,13 +294,18 @@ export function createServer(config: ServerConfig) {
             return Response.json({ error: "modules array must contain valid module names" }, { status: 400 });
           }
 
+          const globalVarName = typeof body.globalVarName === "string" && body.globalVarName.trim().length > 0
+            ? body.globalVarName.trim()
+            : undefined;
+
           console.log(
             `[request] POST /bundle/${version} with ${modules.length} modules: ` +
-              `${modules.slice(0, 3).join(", ")}${modules.length > 3 ? "..." : ""} `,
+              `${modules.slice(0, 3).join(", ")}${modules.length > 3 ? "..." : ""}` +
+              `${globalVarName ? ` (globalVarName: ${globalVarName})` : ""} `,
           );
 
           try {
-            const { outputFile, buildId, buildDir } = await buildBundle(config, version, modules);
+            const { outputFile, buildId, buildDir } = await buildBundle({config, version, modules, globalVarName});
 
             console.log(`[request:${buildId.slice(0, 8)}] ` + `ready to stream after ${(performance.now() - requestStart).toFixed(0)}ms`);
 

@@ -9,6 +9,8 @@ import {
   getAvailableVersions,
   getModulesForVersion,
   getVersionDir,
+  restoreGlobalVarName,
+  setGlobalVarName,
   type ServerConfig,
 } from "./server";
 
@@ -37,7 +39,12 @@ async function createTestFixture() {
   };
 }
 
-async function createVersionFixture(prebidDir: string, version: string, modules: string[] = ["testBidAdapter", "anotherModule"]) {
+async function createVersionFixture(
+  prebidDir: string,
+  version: string,
+  modules: string[] = ["testBidAdapter", "anotherModule"],
+  packageJson: Record<string, unknown> = { name: "prebid.js", version, globalVarName: "pbjs" },
+) {
   const versionDir = join(prebidDir, `prebid_${version.replace(/\./g, "_")}`);
   const modulesDir = join(versionDir, "modules");
 
@@ -46,6 +53,8 @@ async function createVersionFixture(prebidDir: string, version: string, modules:
   for (const mod of modules) {
     await Bun.write(join(modulesDir, `${mod}.js`), `// Mock module: ${mod}`);
   }
+
+  await Bun.write(join(versionDir, "package.json"), JSON.stringify(packageJson, null, 2));
 
   return versionDir;
 }
@@ -124,6 +133,75 @@ describe("cleanupBuildDir", () => {
   test("returns true for non-existent directory", async () => {
     const result = await cleanupBuildDir("/nonexistent/path", "test-id");
     expect(result).toBe(true);
+  });
+});
+
+describe("setGlobalVarName", () => {
+  let fixture: Awaited<ReturnType<typeof createTestFixture>>;
+  let versionDir: string;
+
+  beforeAll(async () => {
+    fixture = await createTestFixture();
+    versionDir = await createVersionFixture(fixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+  });
+
+  afterAll(async () => {
+    await fixture.cleanup();
+  });
+
+  test("updates globalVarName in package.json and returns original", async () => {
+    const originalValue = await setGlobalVarName(versionDir, "customPbjs");
+
+    expect(originalValue).toBe("pbjs");
+
+    const packageJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(packageJson.globalVarName).toBe("customPbjs");
+  });
+
+  test("handles missing globalVarName in package.json", async () => {
+    const tempFixture = await createTestFixture();
+    const tempVersionDir = await createVersionFixture(tempFixture.prebidDir, "9.0.0", ["testModule"], {
+      name: "prebid.js",
+      version: "9.0.0",
+    });
+
+    const originalValue = await setGlobalVarName(tempVersionDir, "myPbjs");
+
+    expect(originalValue).toBeUndefined();
+
+    const packageJson = await Bun.file(join(tempVersionDir, "package.json")).json();
+    expect(packageJson.globalVarName).toBe("myPbjs");
+
+    await tempFixture.cleanup();
+  });
+});
+
+describe("restoreGlobalVarName", () => {
+  let fixture: Awaited<ReturnType<typeof createTestFixture>>;
+  let versionDir: string;
+
+  beforeAll(async () => {
+    fixture = await createTestFixture();
+    versionDir = await createVersionFixture(fixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "modified",
+    });
+  });
+
+  afterAll(async () => {
+    await fixture.cleanup();
+  });
+
+  test("restores original globalVarName in package.json", async () => {
+    await restoreGlobalVarName(versionDir, "pbjs");
+
+    const packageJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(packageJson.globalVarName).toBe("pbjs");
   });
 });
 
@@ -343,7 +421,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    const result = await buildBundle(config, "10.20.0", ["appnexusBidAdapter", "rubiconBidAdapter"]);
+    const result = await buildBundle({config : config, version : "10.20.0", modules : ["appnexusBidAdapter", "rubiconBidAdapter"]});
 
     // Verify spawn was called with correct command
     expect(spawnCalls.length).toBe(1);
@@ -370,7 +448,7 @@ describe("buildBundle", () => {
       buildTimeoutMs: 5000,
     };
 
-    await expect(buildBundle(config, "99.99.99", ["test"])).rejects.toThrow("Version 99.99.99 not found");
+    await expect(buildBundle({config : config, version : "99.99.99", modules : ["test"]})).rejects.toThrow("Version 99.99.99 not found");
   });
 
   test("handles build failure with non-zero exit code", async () => {
@@ -401,7 +479,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await expect(buildBundle(config, "10.20.0", ["test"])).rejects.toThrow("Build failed:");
+    await expect(buildBundle({config : config, version : "10.20.0", modules : ["test"]})).rejects.toThrow("Build failed:");
   });
 
   test("handles build timeout", async () => {
@@ -435,7 +513,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await expect(buildBundle(config, "10.20.0", ["test"])).rejects.toThrow("Build timed out after 100ms");
+    await expect(buildBundle({config : config, version : "10.20.0", modules : ["test"]})).rejects.toThrow("Build timed out after 100ms");
 
     expect(killCalled).toBe(true);
   });
@@ -478,8 +556,140 @@ describe("buildBundle", () => {
     };
 
     // Test with duplicates and spaces - buildBundle receives already cleaned modules
-    await buildBundle(config, "10.20.0", ["moduleA", "moduleB"]);
+    await buildBundle({config : config, version : "10.20.0", modules : ["moduleA", "moduleB"]});
 
     expect(spawnCalls[0].cmd[3]).toBe("--modules=moduleA,moduleB");
+  });
+
+  test("uses gulp build when globalVarName is provided", async () => {
+    const spawnCalls: Array<{ cmd: string[]; opts: MockSpawnOpts }> = [];
+    let buildDirPath: string | null = null;
+
+    const mockSpawn = (cmd: string[], opts: MockSpawnOpts = {}) => {
+      spawnCalls.push({ cmd, opts });
+      buildDirPath = opts.env?.PREBID_DIST_PATH;
+
+      return {
+        exited: (async () => {
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    await buildBundle({config, version: "10.20.0", modules: ["testModule"], globalVarName: "customPbjs"});
+
+    // Verify gulp build is used instead of gulp bundle
+    expect(spawnCalls.length).toBe(1);
+    expect(spawnCalls[0].cmd).toEqual(["npx", "gulp", "build", "--modules=testModule"]);
+  });
+
+  test("modifies and restores package.json when globalVarName is provided", async () => {
+    // Create a fresh fixture for this test to avoid state pollution
+    const testFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(testFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    let capturedGlobalVarName: string | undefined;
+
+    const mockSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      return {
+        exited: (async () => {
+          // Capture the globalVarName during the build
+          const pkgJson = await Bun.file(join(versionDir, "package.json")).json();
+          capturedGlobalVarName = pkgJson.globalVarName;
+
+          // Create the output file
+          const buildDirPath = opts.env?.PREBID_DIST_PATH;
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config: ServerConfig = {
+      prebidDir: testFixture.prebidDir,
+      buildsDir: testFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    await buildBundle({config, version: "10.20.0", modules: ["testModule"], globalVarName: "myCustomVar"});
+
+    // Verify the globalVarName was changed during the build
+    expect(capturedGlobalVarName).toBe("myCustomVar");
+
+    // Verify the globalVarName was restored after the build
+    const restoredPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(restoredPkgJson.globalVarName).toBe("pbjs");
+
+    await testFixture.cleanup();
+  });
+
+  test("restores package.json on timeout when globalVarName is provided", async () => {
+    const testFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(testFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "originalVar",
+    });
+
+    const mockSpawn = () => {
+      return {
+        exited: new Promise(() => {}), // Never resolves
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config: ServerConfig = {
+      prebidDir: testFixture.prebidDir,
+      buildsDir: testFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 50,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    await expect(buildBundle({config, version: "10.20.0", modules: ["test"], globalVarName: "tempVar"})).rejects.toThrow("Build timed out");
+
+    // Verify the globalVarName was restored after the timeout
+    const restoredPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(restoredPkgJson.globalVarName).toBe("originalVar");
+
+    await testFixture.cleanup();
   });
 });
