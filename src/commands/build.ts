@@ -21,6 +21,7 @@ interface BuildOptions {
   dockerfile?: string;
   noCache: boolean;
   quiet: boolean;
+  globalVarName?: string;
 }
 
 export async function build(args: string[]) {
@@ -37,6 +38,7 @@ export async function build(args: string[]) {
       dockerfile: { type: "string", short: "f" },
       "no-cache": { type: "boolean" },
       quiet: { type: "boolean", short: "q" },
+      "global-var-name": { type: "string", short: "g" },
     },
     allowPositionals: false,
   });
@@ -48,22 +50,24 @@ prebid-bundler build - Build a Docker image with Prebid.js versions
 Usage: prebid-bundler build [options]
 
 Options:
-  -h, --help              Show this help message
-  -v, --versions <list>   Comma-separated list of Prebid versions (e.g., "10.20.0,9.53.5")
-  -n, --count <num>       Number of recent versions to include (default: 2)
-  -t, --tag <name>        Docker image tag (default: prebid-bundler:latest)
-  -p, --push              Push image to registry after building
-  --platform <platform>   Target platform (e.g., linux/amd64,linux/arm64)
-  -c, --context <dir>     Build context directory (default: package's docker dir)
-  -f, --dockerfile <path> Path to Dockerfile (default: package's Dockerfile)
-  --no-cache              Build without using cache
-  -q, --quiet             Suppress build output
+  -h, --help                  Show this help message
+  -v, --versions <list>       Comma-separated list of Prebid versions (e.g., "10.20.0,9.53.5")
+  -n, --count <num>           Number of recent versions to include (default: 2)
+  -t, --tag <name>            Docker image tag (default: prebid-bundler:latest)
+  -p, --push                  Push image to registry after building
+  --platform <platform>       Target platform (e.g., linux/amd64,linux/arm64)
+  -c, --context <dir>         Build context directory (default: package's docker dir)
+  -f, --dockerfile <path>     Path to Dockerfile (default: package's Dockerfile)
+  --no-cache                  Build without using cache
+  -q, --quiet                 Suppress build output
+  -g, --global-var-name <n>   Set the Prebid global variable name (default: pbjs)
 
 Examples:
   prebid-bundler build
   prebid-bundler build --versions 10.20.0,9.53.5 --tag my-prebid:v1
   prebid-bundler build --count 5 --tag prebid:5-versions
   prebid-bundler build --platform linux/amd64 --push
+  prebid-bundler build -g myPrebid --tag prebid:custom-global
 
 Notes:
   - By default, uses the Dockerfile from the prebid-bundler package
@@ -82,13 +86,14 @@ Notes:
     dockerfile: values.dockerfile,
     noCache: values["no-cache"] ?? false,
     quiet: values.quiet ?? false,
+    globalVarName: values["global-var-name"],
   };
 
   await buildDockerImage(options);
 }
 
 async function buildDockerImage(options: BuildOptions) {
-  const { versions, count, tag, push, platform, buildContext, dockerfile, noCache, quiet } = options;
+  const { versions, count, tag, push, platform, buildContext, dockerfile, noCache, quiet, globalVarName } = options;
 
   // Determine Dockerfile location
   const dockerfilePath = dockerfile ?? DOCKERFILE_PATH;
@@ -129,6 +134,11 @@ async function buildDockerImage(options: BuildOptions) {
     dockerArgs.push("--build-arg", `PREBID_COUNT=${count}`);
   }
 
+  // Add global variable name if specified
+  if (globalVarName) {
+    dockerArgs.push("--build-arg", `PREBID_GLOBAL_VAR_NAME=${globalVarName}`);
+  }
+
   // Add platform if specified
   if (platform) {
     dockerArgs.push("--platform", platform);
@@ -157,6 +167,9 @@ async function buildDockerImage(options: BuildOptions) {
       console.log(`  Version count: ${count}`);
     } else {
       console.log(`  Version count: 2 (default)`);
+    }
+    if (globalVarName) {
+      console.log(`  Global variable name: ${globalVarName}`);
     }
     console.log("");
   }
