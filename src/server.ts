@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { clearTimings, createTimingContext, mark, measure } from "./perf.ts";
 import { parseVersion } from "./utils.ts";
 import { file } from "bun";
 
@@ -130,17 +131,20 @@ interface BuildBundleParams {
 }
 
 export async function buildBundle({config, version, modules, globalVarName}: BuildBundleParams): Promise<BuildResult> {
-  const totalStart = performance.now();
   const buildId = crypto.randomUUID();
-  const spawn = config.spawn || Bun.spawn;
+  const ctx = createTimingContext(`build:${buildId.slice(0, 8)}`);
+  const spawn = config?.spawn || Bun.spawn;
+
+  mark(ctx, "start", { version, moduleCount: modules.length });
 
   // Phase 1: Validation
-  const validationStart = performance.now();
+  mark(ctx, "validation:start");
   const versionDir = getVersionDir(config.prebidDir, version);
   if (!existsSync(versionDir)) {
+    clearTimings(ctx);
     throw new Error(`Version ${version} not found`);
   }
-  const validationTime = performance.now() - validationStart;
+  mark(ctx, "validation:end");
 
   // Phase 1.5: Set globalVarName in package.json if provided
   let originalGlobalVarName: string | undefined;
@@ -149,14 +153,13 @@ export async function buildBundle({config, version, modules, globalVarName}: Bui
   }
 
   // Phase 2: Directory setup
-  const dirSetupStart = performance.now();
+  mark(ctx, "dirSetup:start");
   const buildDir = join(config.buildsDir, buildId);
   await mkdir(buildDir, { recursive: true });
-  const dirSetupTime = performance.now() - dirSetupStart;
+  mark(ctx, "dirSetup:end");
 
   // Phase 3: Gulp build with timeout
-  // Use 'gulp build' when globalVarName is set, otherwise use 'gulp bundle'
-  const gulpStart = performance.now();
+  mark(ctx, "gulp:start");
   const modulesArg = modules.join(",");
   const gulpCommand = globalVarName ? "build" : "bundle";
   const proc = spawn(["npx", "gulp", gulpCommand, `--modules=${modulesArg}`], {
@@ -180,22 +183,20 @@ export async function buildBundle({config, version, modules, globalVarName}: Bui
   try {
     exitCode = await Promise.race([proc.exited, timeoutPromise]);
   } catch (error) {
-    // Restore original globalVarName before cleanup
+    clearTimings(ctx);
+    await cleanupBuildDir(buildDir, buildId);
+    throw error;
+  } finally {
+    // Restore original globalVarName regardless of success or failure
     if (originalGlobalVarName !== undefined) {
       await restoreGlobalVarName(versionDir, originalGlobalVarName);
     }
-    await cleanupBuildDir(buildDir, buildId);
-    throw error;
   }
-  const gulpTime = performance.now() - gulpStart;
-
-  // Restore original globalVarName after build
-  if (originalGlobalVarName !== undefined) {
-    await restoreGlobalVarName(versionDir, originalGlobalVarName);
-  }
+  mark(ctx, "gulp:end");
 
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
+    clearTimings(ctx);
     await cleanupBuildDir(buildDir, buildId);
     throw new Error(`Build failed: ${stderr}`);
   }
@@ -207,47 +208,56 @@ export async function buildBundle({config, version, modules, globalVarName}: Bui
     if (await Bun.file(defaultOutput).exists()) {
       outputFile = defaultOutput;
     } else {
+      clearTimings(ctx);
       await cleanupBuildDir(buildDir, buildId);
       throw new Error("Build completed but output file not found");
     }
   }
 
-  const totalTime = performance.now() - totalStart;
+  mark(ctx, "end");
 
   logMetrics({
     buildId,
     version,
     moduleCount: modules.length,
-    validation: validationTime,
-    dirSetup: dirSetupTime,
-    gulpBuild: gulpTime,
-    total: totalTime,
+    validation: measure(ctx, "validation", "validation:start", "validation:end"),
+    dirSetup: measure(ctx, "dirSetup", "dirSetup:start", "dirSetup:end"),
+    gulpBuild: measure(ctx, "gulp", "gulp:start", "gulp:end"),
+    total: measure(ctx, "total", "start", "end"),
   });
+
+  clearTimings(ctx);
 
   return { outputFile, buildId, buildDir };
 }
 
 async function* generateFileStream(filePath: string, buildId: string, cleanupDir?: string): AsyncGenerator<Uint8Array> {
-  const streamStart = performance.now();
+  const ctx = createTimingContext(`stream:${buildId.slice(0, 8)}`);
   const file = Bun.file(filePath);
   let bytesWritten = 0;
 
+  mark(ctx, "start");
   try {
     for await (const chunk of file.stream()) {
       yield chunk;
       bytesWritten += chunk.length;
     }
   } finally {
-    const streamTime = performance.now() - streamStart;
+    mark(ctx, "streamEnd");
+    const streamTime = measure(ctx, "stream", "start", "streamEnd");
     console.log(`[stream:${buildId.slice(0, 8)}] ` + `sent ${(bytesWritten / 1024).toFixed(1)}KB in ${streamTime.toFixed(0)}ms`);
 
     if (cleanupDir) {
-      const cleanupStart = performance.now();
+      mark(ctx, "cleanupStart");
       const success = await cleanupBuildDir(cleanupDir, buildId);
+      mark(ctx, "cleanupEnd");
       if (success) {
-        console.log(`[cleanup:${buildId.slice(0, 8)}] ` + `completed in ${(performance.now() - cleanupStart).toFixed(0)}ms`);
+        const cleanupTime = measure(ctx, "cleanup", "cleanupStart", "cleanupEnd");
+        console.log(`[cleanup:${buildId.slice(0, 8)}] ` + `completed in ${cleanupTime.toFixed(0)}ms`);
       }
     }
+
+    clearTimings(ctx);
   }
 }
 
@@ -269,9 +279,13 @@ export function createServer(config: ServerConfig) {
     routes: {
       "/bundle/:version": {
         POST: async (req) => {
-          const requestStart = performance.now();
+          const requestId = crypto.randomUUID().slice(0, 8);
+          const ctx = createTimingContext(`request:${requestId}`);
+          mark(ctx, "start");
+
           const version = parseVersion(req.params.version);
           if (!version) {
+            clearTimings(ctx);
             return Response.json({ error: "Invalid version format" }, { status: 400 });
           }
 
@@ -279,10 +293,12 @@ export function createServer(config: ServerConfig) {
           try {
             body = (await req.json()) as BundleRequest;
           } catch {
+            clearTimings(ctx);
             return Response.json({ error: "Invalid JSON body" }, { status: 400 });
           }
 
           if (!Array.isArray(body?.modules) || body?.modules?.length === 0) {
+            clearTimings(ctx);
             return Response.json({ error: "modules array is required" }, { status: 400 });
           }
 
@@ -291,6 +307,7 @@ export function createServer(config: ServerConfig) {
           ];
 
           if (modules.length === 0) {
+            clearTimings(ctx);
             return Response.json({ error: "modules array must contain valid module names" }, { status: 400 });
           }
 
@@ -307,10 +324,14 @@ export function createServer(config: ServerConfig) {
           try {
             const { outputFile, buildId, buildDir } = await buildBundle({config, version, modules, globalVarName});
 
-            console.log(`[request:${buildId.slice(0, 8)}] ` + `ready to stream after ${(performance.now() - requestStart).toFixed(0)}ms`);
+            mark(ctx, "buildComplete");
+            const requestTime = measure(ctx, "untilStream", "start", "buildComplete");
+            console.log(`[request:${buildId.slice(0, 8)}] ` + `ready to stream after ${requestTime.toFixed(0)}ms`);
+            clearTimings(ctx);
 
             return streamFileAndCleanup(outputFile, buildId, buildDir);
           } catch (error) {
+            clearTimings(ctx);
             const message = error instanceof Error ? error.message : "Build failed";
             console.error(`[error] ${message}`);
             return Response.json({ error: message }, { status: 500 });

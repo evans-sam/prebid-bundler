@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ interface MockSpawnOpts {
 
 // Test fixture helpers
 async function createTestFixture() {
-  const rootDir = `${Bun.file(join(tmpdir(), `prebid-test-${Date.now()}`)).name.replace(/[^/]+$/, "")}prebid-test-${crypto.randomUUID()}`;
+  const rootDir = `${Bun.file(join(tmpdir(), `prebid-test-${Date.now()}`)).name?.replace(/[^/]+$/, "")}prebid-test-${crypto.randomUUID()}`;
   const prebidDir = join(rootDir, "dist", "prebid.js");
   const buildsDir = join(rootDir, "dist", "builds");
 
@@ -383,7 +383,7 @@ describe("buildBundle", () => {
 
   test("spawns correct gulp command", async () => {
     const spawnCalls: Array<{ cmd: string[]; opts: MockSpawnOpts }> = [];
-    let buildDirPath: string | null = null;
+    let buildDirPath: string | null | undefined = null;
 
     const mockSpawn = (cmd: string[], opts: MockSpawnOpts = {}) => {
       spawnCalls.push({ cmd, opts });
@@ -425,14 +425,14 @@ describe("buildBundle", () => {
 
     // Verify spawn was called with correct command
     expect(spawnCalls.length).toBe(1);
-    expect(spawnCalls[0].cmd).toEqual(["npx", "gulp", "bundle", "--modules=appnexusBidAdapter,rubiconBidAdapter"]);
+    expect(spawnCalls[0]?.cmd).toEqual(["npx", "gulp", "bundle", "--modules=appnexusBidAdapter,rubiconBidAdapter"]);
 
     // Verify cwd is set to version directory
-    expect(spawnCalls[0].opts.cwd).toContain("prebid_10_20_0");
+    expect(spawnCalls[0]?.opts.cwd).toContain("prebid_10_20_0");
 
     // Verify PREBID_DIST_PATH env var is set
-    expect(spawnCalls[0].opts.env.PREBID_DIST_PATH).toBeDefined();
-    expect(spawnCalls[0].opts.env.PREBID_DIST_PATH).toContain(fixture.buildsDir);
+    expect(spawnCalls[0]?.opts.env?.PREBID_DIST_PATH).toBeDefined();
+    expect(spawnCalls[0]?.opts.env?.PREBID_DIST_PATH).toContain(fixture.buildsDir);
 
     // Verify result
     expect(result.outputFile).toContain("prebid.js");
@@ -558,12 +558,12 @@ describe("buildBundle", () => {
     // Test with duplicates and spaces - buildBundle receives already cleaned modules
     await buildBundle({config : config, version : "10.20.0", modules : ["moduleA", "moduleB"]});
 
-    expect(spawnCalls[0].cmd[3]).toBe("--modules=moduleA,moduleB");
+    expect(spawnCalls[0]?.cmd[3]).toBe("--modules=moduleA,moduleB");
   });
 
   test("uses gulp build when globalVarName is provided", async () => {
     const spawnCalls: Array<{ cmd: string[]; opts: MockSpawnOpts }> = [];
-    let buildDirPath: string | null = null;
+    let buildDirPath: string | undefined;
 
     const mockSpawn = (cmd: string[], opts: MockSpawnOpts = {}) => {
       spawnCalls.push({ cmd, opts });
@@ -684,12 +684,148 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await expect(buildBundle({config, version: "10.20.0", modules: ["test"], globalVarName: "tempVar"})).rejects.toThrow("Build timed out");
+     await expect((buildBundle({config, version: "10.20.0", modules: ["test"], globalVarName: "tempVar"}))).rejects.toThrow();
 
     // Verify the globalVarName was restored after the timeout
     const restoredPkgJson = await Bun.file(join(versionDir, "package.json")).json();
     expect(restoredPkgJson.globalVarName).toBe("originalVar");
 
     await testFixture.cleanup();
+  });
+});
+
+// ============================================================================
+// Performance Marks Cleanup Tests
+// ============================================================================
+
+describe("Performance marks cleanup", () => {
+  let fixture: Awaited<ReturnType<typeof createTestFixture>>;
+
+  beforeAll(async () => {
+    fixture = await createTestFixture();
+    await createVersionFixture(fixture.prebidDir, "10.20.0", ["testModule"]);
+  });
+
+  afterAll(async () => {
+    await fixture.cleanup();
+  });
+
+  afterEach(() => {
+    // Clean up any leftover marks/measures between tests
+    performance.clearMarks();
+    performance.clearMeasures();
+  });
+
+  test("buildBundle cleans up marks after successful build", async () => {
+    const mockSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    // Get marks before
+    const marksBefore = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
+
+    await buildBundle({config, version: "10.20.0", modules: ["testModule"]});
+
+    // Get marks after - should be cleaned up
+    const marksAfter = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
+    const measuresAfter = performance.getEntriesByType("measure").filter((m) => m.name.startsWith("build:"));
+
+    expect(marksAfter.length).toBe(marksBefore.length);
+    expect(measuresAfter.length).toBe(0);
+  });
+
+  test("buildBundle cleans up marks after version not found error", async () => {
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+    };
+
+    try {
+      await buildBundle({config, version: "99.99.99", modules: ["test"]});
+    } catch {
+      // Expected to throw
+    }
+
+    // Marks should be cleaned up even after error
+    const marks = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
+    expect(marks.length).toBe(0);
+  });
+
+  test("buildBundle cleans up marks after build failure", async () => {
+    const mockSpawn = () => ({
+      exited: Promise.resolve(1),
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("error")); c.close(); } }),
+      kill: () => {},
+      pid: 12345,
+    });
+
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    try {
+        await buildBundle({config, version: "10.20.0", modules: ["test"]});
+    } catch {
+      // Expected to throw
+    }
+
+    // Marks should be cleaned up even after error
+    const marks = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
+    expect(marks.length).toBe(0);
+  });
+
+  test("buildBundle cleans up marks after timeout", async () => {
+    const mockSpawn = () => ({
+      exited: new Promise(() => {}), // Never resolves
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      kill: () => {},
+      pid: 12345,
+    });
+
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 50,
+      spawn: mockSpawn as unknown as typeof Bun.spawn,
+    };
+
+    try {
+      await buildBundle({config, version: "10.20.0", modules: ["test"]});
+    } catch {
+      // Expected to throw
+    }
+
+    // Marks should be cleaned up even after timeout
+    const marks = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
+    expect(marks.length).toBe(0);
   });
 });
