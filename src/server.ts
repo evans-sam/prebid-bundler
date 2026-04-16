@@ -5,6 +5,96 @@ import { clearTimings, createTimingContext, mark, measure } from "./perf.ts";
 import { parseVersion } from "./utils.ts";
 import { file } from "bun";
 
+// ---------------------------------------------------------------------------
+// Input validation (issues #20, #21)
+//
+// Both values flow into shell-adjacent or file contents (gulp --modules=...
+// and a version's package.json respectively), so we enforce a strict
+// allowlist at the HTTP boundary. Rejected values are NOT echoed in error
+// responses to avoid log-injection via the API surface.
+// ---------------------------------------------------------------------------
+
+// Module names: allow letters, digits, dot, underscore, dash — but the first
+// character must be a letter, digit, or underscore. This prevents flag-like
+// tokens ("--", "-abc") from being passed through to argv consumers, and
+// rejects pure path-traversal tokens ("..", "../x"). Slashes, whitespace,
+// shell metacharacters, and control characters are all outside the allowlist.
+const MODULE_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/;
+
+// globalVarName: a JavaScript identifier (excluding reserved words). Must
+// start with a letter, underscore, or $.
+const GLOBAL_VAR_NAME_RE = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+
+// JS reserved words cannot be used as identifiers in strict mode or as
+// globally-assigned variable names without breaking the generated bundle.
+// Keep this list minimal but complete enough to catch the common words.
+const JS_RESERVED_WORDS = new Set([
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "import",
+  "in",
+  "instanceof",
+  "let",
+  "new",
+  "null",
+  "return",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+  "await",
+  "async",
+  "implements",
+  "interface",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "static",
+]);
+
+const MODULE_NAME_MAX = 128;
+const GLOBAL_VAR_NAME_MAX = 64;
+
+export function validateModuleName(name: unknown): name is string {
+  return typeof name === "string" && name.length > 0 && name.length <= MODULE_NAME_MAX && MODULE_NAME_RE.test(name);
+}
+
+export function validateGlobalVarName(name: unknown): name is string {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= GLOBAL_VAR_NAME_MAX &&
+    GLOBAL_VAR_NAME_RE.test(name) &&
+    !JS_RESERVED_WORDS.has(name)
+  );
+}
+
 export interface ServerConfig {
   prebidDir: string;
   buildsDir: string;
@@ -93,10 +183,7 @@ export interface BundleRequest {
   globalVarName?: string;
 }
 
-export async function setGlobalVarName(
-  versionDir: string,
-  globalVarName: string,
-): Promise<string> {
+export async function setGlobalVarName(versionDir: string, globalVarName: string): Promise<string> {
   const packageJsonPath = join(versionDir, "package.json");
   const packageJsonFile = file(packageJsonPath);
   const packageJson = await packageJsonFile.json();
@@ -106,10 +193,7 @@ export async function setGlobalVarName(
   return originalGlobalVarName;
 }
 
-export async function restoreGlobalVarName(
-  versionDir: string,
-  originalGlobalVarName: string,
-): Promise<void> {
+export async function restoreGlobalVarName(versionDir: string, originalGlobalVarName: string): Promise<void> {
   const packageJsonPath = join(versionDir, "package.json");
   const packageJsonFile = file(packageJsonPath);
   const packageJson = await packageJsonFile.json();
@@ -130,7 +214,7 @@ interface BuildBundleParams {
   globalVarName?: string;
 }
 
-export async function buildBundle({config, version, modules, globalVarName}: BuildBundleParams): Promise<BuildResult> {
+export async function buildBundle({ config, version, modules, globalVarName }: BuildBundleParams): Promise<BuildResult> {
   const buildId = crypto.randomUUID();
   const ctx = createTimingContext(`build:${buildId.slice(0, 8)}`);
   const spawn = config?.spawn || Bun.spawn;
@@ -311,9 +395,29 @@ export function createServer(config: ServerConfig) {
             return Response.json({ error: "modules array must contain valid module names" }, { status: 400 });
           }
 
-          const globalVarName = typeof body.globalVarName === "string" && body.globalVarName.trim().length > 0
-            ? body.globalVarName.trim()
-            : undefined;
+          // Strict allowlist validation: reject any module name that is not a
+          // simple identifier-like token. Prevents shell metacharacters, path
+          // traversal, flag-lookalikes, and unicode bidi tricks from reaching
+          // `gulp --modules=...`. The 400 response names the field index but
+          // never echoes the rejected value (log-injection defense).
+          for (let i = 0; i < modules.length; i++) {
+            if (!validateModuleName(modules[i])) {
+              clearTimings(ctx);
+              return Response.json({ error: "Invalid module name", field: `modules[${i}]` }, { status: 400 });
+            }
+          }
+
+          // globalVarName: `undefined` (omitted) is allowed. Any other value
+          // must be a valid JS identifier within the length cap, otherwise
+          // reject with 400. Non-strings (number, null, array, ...) land here.
+          let globalVarName: string | undefined;
+          if (body.globalVarName !== undefined) {
+            if (!validateGlobalVarName(body.globalVarName)) {
+              clearTimings(ctx);
+              return Response.json({ error: "Invalid globalVarName", field: "globalVarName" }, { status: 400 });
+            }
+            globalVarName = body.globalVarName;
+          }
 
           console.log(
             `[request] POST /bundle/${version} with ${modules.length} modules: ` +
@@ -322,7 +426,7 @@ export function createServer(config: ServerConfig) {
           );
 
           try {
-            const { outputFile, buildId, buildDir } = await buildBundle({config, version, modules, globalVarName});
+            const { outputFile, buildId, buildDir } = await buildBundle({ config, version, modules, globalVarName });
 
             mark(ctx, "buildComplete");
             const requestTime = measure(ctx, "untilStream", "start", "buildComplete");
