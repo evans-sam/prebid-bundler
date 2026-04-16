@@ -205,7 +205,7 @@ You can now customize the source code as needed.
 #   docker build --build-arg PREBID_COUNT=5 -t prebid-bundler .
 #   docker build --build-arg PREBID_VERSION=10.20.0 -t prebid-bundler:10.20.0 .
 
-FROM oven/bun:1 AS base
+FROM oven/bun:1@sha256:8956c7667fa17beb6e3c664115e66bdacfe502da5d99603626e74c197bdef160 AS base
 WORKDIR /usr/src/app
 
 # Install dependencies into temp directory for caching
