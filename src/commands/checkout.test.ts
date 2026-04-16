@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 
 /**
  * These tests verify the checkout CLI argument parsing.
- * Integration tests that run git clone are in a separate file.
  */
 
 describe("checkout CLI parsing", () => {
