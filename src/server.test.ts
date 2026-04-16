@@ -366,6 +366,210 @@ describe("HTTP Endpoints", () => {
 });
 
 // ============================================================================
+// Input Validation Tests: Module Names and globalVarName (issues #20, #21)
+// ============================================================================
+
+describe("POST /bundle/:version input validation", () => {
+  let fixture: Awaited<ReturnType<typeof createTestFixture>>;
+  let server: ReturnType<typeof createServer>;
+  let baseUrl: string;
+
+  // Mock spawn that always succeeds by creating the expected prebid.js output file.
+  // The validation layer should reject bad input before this is ever called, but
+  // accept-path tests need a working build to reach a 200 response.
+  const makeSuccessSpawn =
+    () =>
+    (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+  beforeAll(async () => {
+    fixture = await createTestFixture();
+    await createVersionFixture(fixture.prebidDir, "10.20.0", ["appnexusBidAdapter", "rubiconBidAdapter"]);
+
+    const config: ServerConfig = {
+      prebidDir: fixture.prebidDir,
+      buildsDir: fixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: makeSuccessSpawn() as unknown as typeof Bun.spawn,
+    };
+
+    server = createServer(config);
+    baseUrl = server.url.origin;
+  });
+
+  afterAll(async () => {
+    server.stop();
+    await fixture.cleanup();
+  });
+
+  async function postBundle(body: unknown): Promise<{ status: number; json: { error?: string; field?: string } }> {
+    const response = await fetch(`${baseUrl}/bundle/10.20.0`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    // Drain body so the connection can close cleanly even on success (binary stream).
+    if (response.headers.get("Content-Type")?.includes("application/json")) {
+      const json = (await response.json()) as { error?: string; field?: string };
+      return { status: response.status, json };
+    }
+    // Consume the stream to release the server-side handler.
+    await response.arrayBuffer();
+    return { status: response.status, json: {} };
+  }
+
+  describe("module name validation", () => {
+    // Reject cases: each invalid module name returns 400 with field: "modules[0]"
+    const rejectCases: Array<[string, string]> = [
+      ["leading dashes --", "--"],
+      ["shell metacharacter ;rm -rf /", ";rm -rf /"],
+      ["command substitution $(whoami)", "$(whoami)"],
+      ["backtick command substitution", "`id`"],
+      ["path traversal ..", ".."],
+      ["path traversal ../etc/passwd", "../etc/passwd"],
+      ["slash foo/bar", "foo/bar"],
+      ["space foo bar", "foo bar"],
+      ["semicolon foo;bar", "foo;bar"],
+      ["leading dash -abc", "-abc"],
+      ["NUL byte", "abc\u0000def"],
+      ["unicode bidi override", "abc\u202Edef"],
+      ["empty string", ""],
+      ["whitespace only", "   "],
+      ["exceeds 128 chars", "a".repeat(129)],
+    ];
+
+    for (const [label, badName] of rejectCases) {
+      test(`rejects ${label}`, async () => {
+        const { status, json } = await postBundle({ modules: [badName] });
+
+        expect(status).toBe(400);
+        // Empty/whitespace-only names are dropped by the dedupe filter before
+        // reaching the per-index validator; the pre-existing error fires
+        // instead. We confirm the shape is a 400 with a modules-related error.
+        if (badName.trim().length === 0) {
+          expect(json.error).toMatch(/modules/);
+        } else {
+          expect(json.error).toBe("Invalid module name");
+          expect(json.field).toBe("modules[0]");
+        }
+      });
+    }
+
+    // Accept cases: each valid module name reaches buildBundle via mock spawn
+    const acceptCases: Array<[string, string]> = [
+      ["appnexusBidAdapter", "appnexusBidAdapter"],
+      ["rubiconBidAdapter", "rubiconBidAdapter"],
+      ["foo-bar_baz.js", "foo-bar_baz.js"],
+      ["abc123", "abc123"],
+      ["_private", "_private"],
+    ];
+
+    for (const [label, goodName] of acceptCases) {
+      test(`accepts ${label}`, async () => {
+        const { status } = await postBundle({ modules: [goodName] });
+        expect(status).toBe(200);
+      });
+    }
+
+    test("rejects mixed array, identifying the first invalid entry's index", async () => {
+      const { status, json } = await postBundle({ modules: ["appnexusBidAdapter", ";rm -rf /"] });
+
+      expect(status).toBe(400);
+      expect(json.error).toBe("Invalid module name");
+      expect(json.field).toBe("modules[1]");
+    });
+
+    test("400 response body does not echo the raw rejected module name", async () => {
+      const response = await fetch(`${baseUrl}/bundle/10.20.0`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modules: ["$(malicious)"] }),
+      });
+      expect(response.status).toBe(400);
+
+      const bodyText = await response.text();
+      expect(bodyText).not.toContain("$(malicious)");
+    });
+  });
+
+  describe("globalVarName validation", () => {
+    type RejectCase = [label: string, badValue: unknown];
+    const rejectCases: RejectCase[] = [
+      ["JSON-string breakout", "\"}; require('child_process').exec('rm -rf /')"],
+      ["JS reserved word return", "return"],
+      ["JS reserved word class", "class"],
+      ["leading digit 2pbjs", "2pbjs"],
+      ["dash my-var", "my-var"],
+      ["dot my.var", "my.var"],
+      ["space my var", "my var"],
+      ["brace $bad}", "$bad}"],
+      ["empty string", ""],
+      ["non-string number", 42],
+      ["non-string null", null],
+      ["non-string array", ["pbjs"]],
+      ["exceeds 64 chars", "a".repeat(65)],
+    ];
+
+    for (const [label, badValue] of rejectCases) {
+      test(`rejects ${label}`, async () => {
+        const { status, json } = await postBundle({
+          modules: ["appnexusBidAdapter"],
+          globalVarName: badValue,
+        });
+
+        expect(status).toBe(400);
+        expect(json.error).toBe("Invalid globalVarName");
+        expect(json.field).toBe("globalVarName");
+      });
+    }
+
+    const acceptCases: Array<[string, string]> = [
+      ["pbjs", "pbjs"],
+      ["_myGlobal", "_myGlobal"],
+      ["$prebid", "$prebid"],
+      ["PrebidJS_v2", "PrebidJS_v2"],
+    ];
+
+    for (const [label, goodValue] of acceptCases) {
+      test(`accepts ${label}`, async () => {
+        const { status } = await postBundle({
+          modules: ["appnexusBidAdapter"],
+          globalVarName: goodValue,
+        });
+        expect(status).toBe(200);
+      });
+    }
+
+    test("omitted globalVarName is allowed (undefined triggers no validation)", async () => {
+      const { status } = await postBundle({ modules: ["appnexusBidAdapter"] });
+      expect(status).toBe(200);
+    });
+  });
+});
+
+// ============================================================================
 // Build Process Tests: Command Verification
 // ============================================================================
 
@@ -421,7 +625,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    const result = await buildBundle({config : config, version : "10.20.0", modules : ["appnexusBidAdapter", "rubiconBidAdapter"]});
+    const result = await buildBundle({ config: config, version: "10.20.0", modules: ["appnexusBidAdapter", "rubiconBidAdapter"] });
 
     // Verify spawn was called with correct command
     expect(spawnCalls.length).toBe(1);
@@ -448,7 +652,7 @@ describe("buildBundle", () => {
       buildTimeoutMs: 5000,
     };
 
-    await expect(buildBundle({config : config, version : "99.99.99", modules : ["test"]})).rejects.toThrow("Version 99.99.99 not found");
+    await expect(buildBundle({ config: config, version: "99.99.99", modules: ["test"] })).rejects.toThrow("Version 99.99.99 not found");
   });
 
   test("handles build failure with non-zero exit code", async () => {
@@ -479,7 +683,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await expect(buildBundle({config : config, version : "10.20.0", modules : ["test"]})).rejects.toThrow("Build failed:");
+    await expect(buildBundle({ config: config, version: "10.20.0", modules: ["test"] })).rejects.toThrow("Build failed:");
   });
 
   test("handles build timeout", async () => {
@@ -513,7 +717,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await expect(buildBundle({config : config, version : "10.20.0", modules : ["test"]})).rejects.toThrow("Build timed out after 100ms");
+    await expect(buildBundle({ config: config, version: "10.20.0", modules: ["test"] })).rejects.toThrow("Build timed out after 100ms");
 
     expect(killCalled).toBe(true);
   });
@@ -556,7 +760,7 @@ describe("buildBundle", () => {
     };
 
     // Test with duplicates and spaces - buildBundle receives already cleaned modules
-    await buildBundle({config : config, version : "10.20.0", modules : ["moduleA", "moduleB"]});
+    await buildBundle({ config: config, version: "10.20.0", modules: ["moduleA", "moduleB"] });
 
     expect(spawnCalls[0]?.cmd[3]).toBe("--modules=moduleA,moduleB");
   });
@@ -599,7 +803,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await buildBundle({config, version: "10.20.0", modules: ["testModule"], globalVarName: "customPbjs"});
+    await buildBundle({ config, version: "10.20.0", modules: ["testModule"], globalVarName: "customPbjs" });
 
     // Verify gulp build is used instead of gulp bundle
     expect(spawnCalls.length).toBe(1);
@@ -631,8 +835,16 @@ describe("buildBundle", () => {
           }
           return 0;
         })(),
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
         kill: () => {},
         pid: 12345,
       };
@@ -646,7 +858,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-    await buildBundle({config, version: "10.20.0", modules: ["testModule"], globalVarName: "myCustomVar"});
+    await buildBundle({ config, version: "10.20.0", modules: ["testModule"], globalVarName: "myCustomVar" });
 
     // Verify the globalVarName was changed during the build
     expect(capturedGlobalVarName).toBe("myCustomVar");
@@ -669,8 +881,16 @@ describe("buildBundle", () => {
     const mockSpawn = () => {
       return {
         exited: new Promise(() => {}), // Never resolves
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
         kill: () => {},
         pid: 12345,
       };
@@ -684,7 +904,7 @@ describe("buildBundle", () => {
       spawn: mockSpawn as unknown as typeof Bun.spawn,
     };
 
-     await expect((buildBundle({config, version: "10.20.0", modules: ["test"], globalVarName: "tempVar"}))).rejects.toThrow();
+    await expect(buildBundle({ config, version: "10.20.0", modules: ["test"], globalVarName: "tempVar" })).rejects.toThrow();
 
     // Verify the globalVarName was restored after the timeout
     const restoredPkgJson = await Bun.file(join(versionDir, "package.json")).json();
@@ -726,8 +946,16 @@ describe("Performance marks cleanup", () => {
           }
           return 0;
         })(),
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
         kill: () => {},
         pid: 12345,
       };
@@ -744,7 +972,7 @@ describe("Performance marks cleanup", () => {
     // Get marks before
     const marksBefore = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
 
-    await buildBundle({config, version: "10.20.0", modules: ["testModule"]});
+    await buildBundle({ config, version: "10.20.0", modules: ["testModule"] });
 
     // Get marks after - should be cleaned up
     const marksAfter = performance.getEntriesByType("mark").filter((m) => m.name.startsWith("build:"));
@@ -763,7 +991,7 @@ describe("Performance marks cleanup", () => {
     };
 
     try {
-      await buildBundle({config, version: "99.99.99", modules: ["test"]});
+      await buildBundle({ config, version: "99.99.99", modules: ["test"] });
     } catch {
       // Expected to throw
     }
@@ -776,8 +1004,17 @@ describe("Performance marks cleanup", () => {
   test("buildBundle cleans up marks after build failure", async () => {
     const mockSpawn = () => ({
       exited: Promise.resolve(1),
-      stdout: new ReadableStream({ start(c) { c.close(); } }),
-      stderr: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("error")); c.close(); } }),
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("error"));
+          c.close();
+        },
+      }),
       kill: () => {},
       pid: 12345,
     });
@@ -791,7 +1028,7 @@ describe("Performance marks cleanup", () => {
     };
 
     try {
-        await buildBundle({config, version: "10.20.0", modules: ["test"]});
+      await buildBundle({ config, version: "10.20.0", modules: ["test"] });
     } catch {
       // Expected to throw
     }
@@ -804,8 +1041,16 @@ describe("Performance marks cleanup", () => {
   test("buildBundle cleans up marks after timeout", async () => {
     const mockSpawn = () => ({
       exited: new Promise(() => {}), // Never resolves
-      stdout: new ReadableStream({ start(c) { c.close(); } }),
-      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      stdout: new ReadableStream({
+        start(c) {
+          c.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.close();
+        },
+      }),
       kill: () => {},
       pid: 12345,
     });
@@ -819,7 +1064,7 @@ describe("Performance marks cleanup", () => {
     };
 
     try {
-      await buildBundle({config, version: "10.20.0", modules: ["test"]});
+      await buildBundle({ config, version: "10.20.0", modules: ["test"] });
     } catch {
       // Expected to throw
     }
