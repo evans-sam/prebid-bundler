@@ -73,4 +73,22 @@ describe("withVersionLock", () => {
     const second = withVersionLock("v1", async () => "ok");
     expect(await second).toBe("ok");
   });
+
+  test("queued acquirers for the same version run in FIFO order", async () => {
+    const started: number[] = [];
+
+    const promises: Promise<void>[] = [];
+    for (let i = 0; i < 5; i++) {
+      promises.push(
+        withVersionLock("v1", async () => {
+          started.push(i);
+          await Bun.sleep(5);
+        }),
+      );
+    }
+
+    await Promise.all(promises);
+
+    expect(started).toEqual([0, 1, 2, 3, 4]);
+  });
 });
