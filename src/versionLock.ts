@@ -23,3 +23,9 @@ export async function withVersionLock<T>(version: string, fn: () => Promise<T>):
 export function _resetLocksForTest(): void {
   tails.clear();
 }
+
+// Test-only helper. Returns the number of currently-tracked versions so
+// tests can verify cleanup. Do not use outside tests.
+export function _lockCountForTest(): number {
+  return tails.size;
+}

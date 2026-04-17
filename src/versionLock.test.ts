@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { _resetLocksForTest, withVersionLock } from "./versionLock";
+import { _lockCountForTest, _resetLocksForTest, withVersionLock } from "./versionLock";
 
 afterEach(() => {
   _resetLocksForTest();
@@ -90,5 +90,15 @@ describe("withVersionLock", () => {
     await Promise.all(promises);
 
     expect(started).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  test("releases map entry after last holder finishes", async () => {
+    expect(_lockCountForTest()).toBe(0);
+
+    await withVersionLock("v1", async () => {
+      expect(_lockCountForTest()).toBe(1);
+    });
+
+    expect(_lockCountForTest()).toBe(0);
   });
 });
