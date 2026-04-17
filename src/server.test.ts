@@ -585,6 +585,30 @@ describe("buildBundle", () => {
     await fixture.cleanup();
   });
 
+  // Helper: mock spawn that waits `delayMs` then reads pkg.json and calls
+  // the capture callback with the globalVarName it saw. Creates a mock
+  // output file so buildBundle succeeds.
+  function makeCapturingSpawn(versionDir: string, onCapture: (value: unknown) => void, delayMs = 100) {
+    return (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          await Bun.sleep(delayMs);
+          const pkgJson = await Bun.file(join(versionDir, "package.json")).json();
+          onCapture(pkgJson.globalVarName);
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+  }
+
   test("spawns correct gulp command", async () => {
     const spawnCalls: Array<{ cmd: string[]; opts: MockSpawnOpts }> = [];
     let buildDirPath: string | null | undefined = null;
@@ -911,6 +935,239 @@ describe("buildBundle", () => {
     expect(restoredPkgJson.globalVarName).toBe("originalVar");
 
     await testFixture.cleanup();
+  });
+
+  test("serializes concurrent builds for the same version with different globalVarName", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    const captured: Record<string, unknown> = {};
+
+    const configA: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: makeCapturingSpawn(versionDir, (v) => {
+        captured.a = v;
+      }) as unknown as typeof Bun.spawn,
+    };
+
+    const configB: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: makeCapturingSpawn(versionDir, (v) => {
+        captured.b = v;
+      }) as unknown as typeof Bun.spawn,
+    };
+
+    await Promise.all([
+      buildBundle({ config: configA, version: "10.20.0", modules: ["testModule"], globalVarName: "varA" }),
+      buildBundle({ config: configB, version: "10.20.0", modules: ["testModule"], globalVarName: "varB" }),
+    ]);
+
+    expect(captured.a).toBe("varA");
+    expect(captured.b).toBe("varB");
+
+    const finalPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(finalPkgJson.globalVarName).toBe("pbjs");
+
+    await localFixture.cleanup();
+  });
+
+  test("first build timeout releases the mutex so the queued build proceeds with correct globalVarName", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    // Build 1: gulp that never exits — will time out.
+    const neverExitSpawn = (_cmd: string[], _opts: MockSpawnOpts = {}) => ({
+      exited: new Promise<number>(() => {}),
+      stdout: new ReadableStream({ start: (c) => c.close() }),
+      stderr: new ReadableStream({ start: (c) => c.close() }),
+      kill: () => {},
+      pid: 12345,
+    });
+
+    let capturedForBuild2: unknown;
+    const captureSpawn = makeCapturingSpawn(versionDir, (v) => {
+      capturedForBuild2 = v;
+    });
+
+    const config1: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 150,
+      spawn: neverExitSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const config2: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: captureSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const build1 = buildBundle({ config: config1, version: "10.20.0", modules: ["testModule"], globalVarName: "willTimeout" });
+    const build2 = buildBundle({ config: config2, version: "10.20.0", modules: ["testModule"], globalVarName: "afterTimeout" });
+
+    await expect(build1).rejects.toThrow("Build timed out after 150ms");
+    await build2;
+
+    expect(capturedForBuild2).toBe("afterTimeout");
+
+    const finalPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(finalPkgJson.globalVarName).toBe("pbjs");
+
+    await localFixture.cleanup();
+  });
+
+  test("builds for different versions run concurrently (no cross-version blocking)", async () => {
+    const localFixture = await createTestFixture();
+    const versionDirA = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+    const versionDirB = await createVersionFixture(localFixture.prebidDir, "10.19.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.19.0",
+      globalVarName: "pbjs",
+    });
+
+    const slowSpawn =
+      (_versionDir: string) =>
+      (_cmd: string[], opts: MockSpawnOpts = {}) => {
+        const buildDirPath = opts.env?.PREBID_DIST_PATH;
+        return {
+          exited: (async () => {
+            await Bun.sleep(100);
+            if (buildDirPath) {
+              await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+            }
+            return 0;
+          })(),
+          stdout: new ReadableStream({ start: (c) => c.close() }),
+          stderr: new ReadableStream({ start: (c) => c.close() }),
+          kill: () => {},
+          pid: 12345,
+        };
+      };
+
+    const configA: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowSpawn(versionDirA) as unknown as typeof Bun.spawn,
+    };
+
+    const configB: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowSpawn(versionDirB) as unknown as typeof Bun.spawn,
+    };
+
+    const start = performance.now();
+    await Promise.all([
+      buildBundle({ config: configA, version: "10.20.0", modules: ["testModule"], globalVarName: "varA" }),
+      buildBundle({ config: configB, version: "10.19.0", modules: ["testModule"], globalVarName: "varB" }),
+    ]);
+    const elapsed = performance.now() - start;
+
+    // Parallel => ~100ms. Serialized => ~200ms. Slack for CI jitter.
+    expect(elapsed).toBeLessThan(180);
+
+    await localFixture.cleanup();
+  });
+
+  test("same-version build without globalVarName still waits for in-flight mutating build", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    const events: string[] = [];
+
+    const slowMutatingSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          events.push("build1:gulp-start");
+          await Bun.sleep(100);
+          events.push("build1:gulp-end");
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle 1");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const fastSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          events.push("build2:gulp-start");
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle 2");
+          }
+          events.push("build2:gulp-end");
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config1: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowMutatingSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const config2: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: fastSpawn as unknown as typeof Bun.spawn,
+    };
+
+    await Promise.all([
+      buildBundle({ config: config1, version: "10.20.0", modules: ["testModule"], globalVarName: "mutator" }),
+      buildBundle({ config: config2, version: "10.20.0", modules: ["testModule"] }),
+    ]);
+
+    expect(events.indexOf("build2:gulp-start")).toBeGreaterThan(events.indexOf("build1:gulp-end"));
+
+    await localFixture.cleanup();
+
+    // Silence "unused" warnings about versionDir — we only need it to exist on disk.
+    expect(versionDir).toContain("prebid_10_20_0");
   });
 });
 
