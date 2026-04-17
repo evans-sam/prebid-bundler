@@ -51,4 +51,15 @@ describe("withVersionLock", () => {
     expect(events.indexOf("b:start")).toBeLessThan(events.indexOf("a:end"));
     expect(events.indexOf("a:start")).toBeLessThan(events.indexOf("b:end"));
   });
+
+  test("releases the lock when fn rejects so next acquirer proceeds", async () => {
+    const first = withVersionLock("v1", async () => {
+      throw new Error("boom");
+    });
+
+    await expect(first).rejects.toThrow("boom");
+
+    const second = withVersionLock("v1", async () => "ok");
+    expect(await second).toBe("ok");
+  });
 });
