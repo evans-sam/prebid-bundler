@@ -1032,6 +1032,65 @@ describe("buildBundle", () => {
 
     await localFixture.cleanup();
   });
+
+  test("builds for different versions run concurrently (no cross-version blocking)", async () => {
+    const localFixture = await createTestFixture();
+    const versionDirA = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+    const versionDirB = await createVersionFixture(localFixture.prebidDir, "10.19.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.19.0",
+      globalVarName: "pbjs",
+    });
+
+    const slowSpawn = (_versionDir: string) => (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          await Bun.sleep(100);
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const configA: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowSpawn(versionDirA) as unknown as typeof Bun.spawn,
+    };
+
+    const configB: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowSpawn(versionDirB) as unknown as typeof Bun.spawn,
+    };
+
+    const start = performance.now();
+    await Promise.all([
+      buildBundle({ config: configA, version: "10.20.0", modules: ["testModule"], globalVarName: "varA" }),
+      buildBundle({ config: configB, version: "10.19.0", modules: ["testModule"], globalVarName: "varB" }),
+    ]);
+    const elapsed = performance.now() - start;
+
+    // Parallel => ~100ms. Serialized => ~200ms. Slack for CI jitter.
+    expect(elapsed).toBeLessThan(180);
+
+    await localFixture.cleanup();
+  });
 });
 
 // ============================================================================
