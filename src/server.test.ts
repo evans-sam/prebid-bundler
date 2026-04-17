@@ -1046,22 +1046,24 @@ describe("buildBundle", () => {
       globalVarName: "pbjs",
     });
 
-    const slowSpawn = (_versionDir: string) => (_cmd: string[], opts: MockSpawnOpts = {}) => {
-      const buildDirPath = opts.env?.PREBID_DIST_PATH;
-      return {
-        exited: (async () => {
-          await Bun.sleep(100);
-          if (buildDirPath) {
-            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
-          }
-          return 0;
-        })(),
-        stdout: new ReadableStream({ start: (c) => c.close() }),
-        stderr: new ReadableStream({ start: (c) => c.close() }),
-        kill: () => {},
-        pid: 12345,
+    const slowSpawn =
+      (_versionDir: string) =>
+      (_cmd: string[], opts: MockSpawnOpts = {}) => {
+        const buildDirPath = opts.env?.PREBID_DIST_PATH;
+        return {
+          exited: (async () => {
+            await Bun.sleep(100);
+            if (buildDirPath) {
+              await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+            }
+            return 0;
+          })(),
+          stdout: new ReadableStream({ start: (c) => c.close() }),
+          stderr: new ReadableStream({ start: (c) => c.close() }),
+          kill: () => {},
+          pid: 12345,
+        };
       };
-    };
 
     const configA: ServerConfig = {
       prebidDir: localFixture.prebidDir,
