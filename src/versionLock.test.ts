@@ -29,4 +29,26 @@ describe("withVersionLock", () => {
     expect(r2).toBe("second-result");
     expect(events).toEqual(["first:start", "first:end", "second:start", "second:end"]);
   });
+
+  test("runs concurrently for different versions", async () => {
+    const events: string[] = [];
+
+    const a = withVersionLock("10.20.0", async () => {
+      events.push("a:start");
+      await Bun.sleep(50);
+      events.push("a:end");
+    });
+
+    const b = withVersionLock("10.19.0", async () => {
+      events.push("b:start");
+      await Bun.sleep(50);
+      events.push("b:end");
+    });
+
+    await Promise.all([a, b]);
+
+    expect(events.indexOf("a:start")).toBeLessThan(events.indexOf("a:end"));
+    expect(events.indexOf("b:start")).toBeLessThan(events.indexOf("a:end"));
+    expect(events.indexOf("a:start")).toBeLessThan(events.indexOf("b:end"));
+  });
 });
