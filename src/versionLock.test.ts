@@ -62,4 +62,15 @@ describe("withVersionLock", () => {
     const second = withVersionLock("v1", async () => "ok");
     expect(await second).toBe("ok");
   });
+
+  test("releases the lock when fn throws synchronously", async () => {
+    const first = withVersionLock("v1", (): Promise<never> => {
+      throw new Error("sync-boom");
+    });
+
+    await expect(first).rejects.toThrow("sync-boom");
+
+    const second = withVersionLock("v1", async () => "ok");
+    expect(await second).toBe("ok");
+  });
 });
