@@ -1091,6 +1091,82 @@ describe("buildBundle", () => {
 
     await localFixture.cleanup();
   });
+
+  test("same-version build without globalVarName still waits for in-flight mutating build", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    const events: string[] = [];
+
+    const slowMutatingSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          events.push("build1:gulp-start");
+          await Bun.sleep(100);
+          events.push("build1:gulp-end");
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle 1");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const fastSpawn = (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          events.push("build2:gulp-start");
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle 2");
+          }
+          events.push("build2:gulp-end");
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+
+    const config1: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: slowMutatingSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const config2: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: fastSpawn as unknown as typeof Bun.spawn,
+    };
+
+    await Promise.all([
+      buildBundle({ config: config1, version: "10.20.0", modules: ["testModule"], globalVarName: "mutator" }),
+      buildBundle({ config: config2, version: "10.20.0", modules: ["testModule"] }),
+    ]);
+
+    expect(events.indexOf("build2:gulp-start")).toBeGreaterThan(events.indexOf("build1:gulp-end"));
+
+    await localFixture.cleanup();
+
+    // Silence "unused" warnings about versionDir — we only need it to exist on disk.
+    expect(versionDir).toContain("prebid_10_20_0");
+  });
 });
 
 // ============================================================================
