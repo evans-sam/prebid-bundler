@@ -980,6 +980,58 @@ describe("buildBundle", () => {
 
     await localFixture.cleanup();
   });
+
+  test("first build timeout releases the mutex so the queued build proceeds with correct globalVarName", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    // Build 1: gulp that never exits — will time out.
+    const neverExitSpawn = (_cmd: string[], _opts: MockSpawnOpts = {}) => ({
+      exited: new Promise<number>(() => {}),
+      stdout: new ReadableStream({ start: (c) => c.close() }),
+      stderr: new ReadableStream({ start: (c) => c.close() }),
+      kill: () => {},
+      pid: 12345,
+    });
+
+    let capturedForBuild2: unknown;
+    const captureSpawn = makeCapturingSpawn(versionDir, (v) => {
+      capturedForBuild2 = v;
+    });
+
+    const config1: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 150,
+      spawn: neverExitSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const config2: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: captureSpawn as unknown as typeof Bun.spawn,
+    };
+
+    const build1 = buildBundle({ config: config1, version: "10.20.0", modules: ["testModule"], globalVarName: "willTimeout" });
+    const build2 = buildBundle({ config: config2, version: "10.20.0", modules: ["testModule"], globalVarName: "afterTimeout" });
+
+    await expect(build1).rejects.toThrow("Build timed out after 150ms");
+    await build2;
+
+    expect(capturedForBuild2).toBe("afterTimeout");
+
+    const finalPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(finalPkgJson.globalVarName).toBe("pbjs");
+
+    await localFixture.cleanup();
+  });
 });
 
 // ============================================================================
