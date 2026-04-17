@@ -585,6 +585,30 @@ describe("buildBundle", () => {
     await fixture.cleanup();
   });
 
+  // Helper: mock spawn that waits `delayMs` then reads pkg.json and calls
+  // the capture callback with the globalVarName it saw. Creates a mock
+  // output file so buildBundle succeeds.
+  function makeCapturingSpawn(versionDir: string, onCapture: (value: unknown) => void, delayMs = 100) {
+    return (_cmd: string[], opts: MockSpawnOpts = {}) => {
+      const buildDirPath = opts.env?.PREBID_DIST_PATH;
+      return {
+        exited: (async () => {
+          await Bun.sleep(delayMs);
+          const pkgJson = await Bun.file(join(versionDir, "package.json")).json();
+          onCapture(pkgJson.globalVarName);
+          if (buildDirPath) {
+            await Bun.write(join(buildDirPath, "prebid.js"), "// mock bundle");
+          }
+          return 0;
+        })(),
+        stdout: new ReadableStream({ start: (c) => c.close() }),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        kill: () => {},
+        pid: 12345,
+      };
+    };
+  }
+
   test("spawns correct gulp command", async () => {
     const spawnCalls: Array<{ cmd: string[]; opts: MockSpawnOpts }> = [];
     let buildDirPath: string | null | undefined = null;
@@ -911,6 +935,50 @@ describe("buildBundle", () => {
     expect(restoredPkgJson.globalVarName).toBe("originalVar");
 
     await testFixture.cleanup();
+  });
+
+  test("serializes concurrent builds for the same version with different globalVarName", async () => {
+    const localFixture = await createTestFixture();
+    const versionDir = await createVersionFixture(localFixture.prebidDir, "10.20.0", ["testModule"], {
+      name: "prebid.js",
+      version: "10.20.0",
+      globalVarName: "pbjs",
+    });
+
+    const captured: Record<string, unknown> = {};
+
+    const configA: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: makeCapturingSpawn(versionDir, (v) => {
+        captured.a = v;
+      }) as unknown as typeof Bun.spawn,
+    };
+
+    const configB: ServerConfig = {
+      prebidDir: localFixture.prebidDir,
+      buildsDir: localFixture.buildsDir,
+      port: 0,
+      buildTimeoutMs: 5000,
+      spawn: makeCapturingSpawn(versionDir, (v) => {
+        captured.b = v;
+      }) as unknown as typeof Bun.spawn,
+    };
+
+    await Promise.all([
+      buildBundle({ config: configA, version: "10.20.0", modules: ["testModule"], globalVarName: "varA" }),
+      buildBundle({ config: configB, version: "10.20.0", modules: ["testModule"], globalVarName: "varB" }),
+    ]);
+
+    expect(captured.a).toBe("varA");
+    expect(captured.b).toBe("varB");
+
+    const finalPkgJson = await Bun.file(join(versionDir, "package.json")).json();
+    expect(finalPkgJson.globalVarName).toBe("pbjs");
+
+    await localFixture.cleanup();
   });
 });
 

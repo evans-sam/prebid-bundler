@@ -3,6 +3,7 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { clearTimings, createTimingContext, mark, measure } from "./perf.ts";
 import { parseVersion } from "./utils.ts";
+import { withVersionLock } from "./versionLock.ts";
 import { file } from "bun";
 
 // ---------------------------------------------------------------------------
@@ -230,56 +231,64 @@ export async function buildBundle({ config, version, modules, globalVarName }: B
   }
   mark(ctx, "validation:end");
 
-  // Phase 1.5: Set globalVarName in package.json if provided
-  let originalGlobalVarName: string | undefined;
-  if (globalVarName) {
-    originalGlobalVarName = await setGlobalVarName(versionDir, globalVarName);
-  }
-
-  // Phase 2: Directory setup
+  // Phase 2: Directory setup (unlocked — per-build isolated)
   mark(ctx, "dirSetup:start");
   const buildDir = join(config.buildsDir, buildId);
   await mkdir(buildDir, { recursive: true });
   mark(ctx, "dirSetup:end");
 
-  // Phase 3: Gulp build with timeout
-  mark(ctx, "gulp:start");
-  const modulesArg = modules.join(",");
-  const gulpCommand = globalVarName ? "build" : "bundle";
-  const proc = spawn(["npx", "gulp", gulpCommand, `--modules=${modulesArg}`], {
-    cwd: versionDir,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...process.env,
-      PREBID_DIST_PATH: buildDir,
-    },
-  });
+  // Phase 3: Serialized pkg.json mutation + gulp build (per-version mutex).
+  // Every build of a version takes the lock, even ones without globalVarName:
+  // gulp reads pkg.json at startup, so a concurrent mutating build could
+  // otherwise leak its transient value into us.
+  const { exitCode, stderr } = await withVersionLock(version, async () => {
+    let originalGlobalVarName: string | undefined;
+    if (globalVarName) {
+      originalGlobalVarName = await setGlobalVarName(versionDir, globalVarName);
+    }
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => {
-      proc.kill();
-      reject(new Error(`Build timed out after ${config.buildTimeoutMs}ms`));
-    }, config.buildTimeoutMs);
-  });
+    try {
+      mark(ctx, "gulp:start");
+      const modulesArg = modules.join(",");
+      const gulpCommand = globalVarName ? "build" : "bundle";
+      const proc = spawn(["npx", "gulp", gulpCommand, `--modules=${modulesArg}`], {
+        cwd: versionDir,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          PREBID_DIST_PATH: buildDir,
+        },
+      });
 
-  let exitCode: number;
-  try {
-    exitCode = await Promise.race([proc.exited, timeoutPromise]);
-  } catch (error) {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          proc.kill();
+          reject(new Error(`Build timed out after ${config.buildTimeoutMs}ms`));
+        }, config.buildTimeoutMs);
+      });
+
+      const code = await Promise.race([proc.exited, timeoutPromise]);
+      mark(ctx, "gulp:end");
+
+      // Read stderr inside the locked region so the proc's streams are
+      // still attached. If exit was non-zero we need the text later.
+      const stderrText = code !== 0 ? await new Response(proc.stderr).text() : "";
+      return { exitCode: code, stderr: stderrText };
+    } finally {
+      if (originalGlobalVarName !== undefined) {
+        await restoreGlobalVarName(versionDir, originalGlobalVarName);
+      }
+    }
+  }).catch(async (error) => {
+    // If the locked section threw (timeout, spawn error, restore error),
+    // clear timings and clean the build dir before rethrowing.
     clearTimings(ctx);
     await cleanupBuildDir(buildDir, buildId);
     throw error;
-  } finally {
-    // Restore original globalVarName regardless of success or failure
-    if (originalGlobalVarName !== undefined) {
-      await restoreGlobalVarName(versionDir, originalGlobalVarName);
-    }
-  }
-  mark(ctx, "gulp:end");
+  });
 
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
     clearTimings(ctx);
     await cleanupBuildDir(buildDir, buildId);
     throw new Error(`Build failed: ${stderr}`);
