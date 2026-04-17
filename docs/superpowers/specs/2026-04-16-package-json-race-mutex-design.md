@@ -49,7 +49,7 @@ Serialize the entire `package.json`-mutation + gulp-run window per version. Cros
 
 The mutex wraps this critical section inside `buildBundle`:
 
-```
+```text
 acquire(version)
   if globalVarName: setGlobalVarName(versionDir, name)  // pkg.json write
   spawn gulp, await exit or timeout

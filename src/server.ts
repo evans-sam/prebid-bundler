@@ -261,14 +261,20 @@ export async function buildBundle({ config, version, modules, globalVarName }: B
         },
       });
 
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutId = setTimeout(() => {
           proc.kill();
           reject(new Error(`Build timed out after ${config.buildTimeoutMs}ms`));
         }, config.buildTimeoutMs);
       });
 
-      const code = await Promise.race([proc.exited, timeoutPromise]);
+      let code: number;
+      try {
+        code = await Promise.race([proc.exited, timeoutPromise]);
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
       mark(ctx, "gulp:end");
 
       // Read stderr inside the locked region so the proc's streams are
